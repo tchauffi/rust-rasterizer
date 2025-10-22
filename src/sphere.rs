@@ -1,14 +1,29 @@
+use core::str;
+
 use crate::vec3::Vec3; 
 use crate::ray::Ray;
+
+pub struct Color {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
+impl Color {
+    pub fn new(r: u8, g: u8, b: u8) -> Self {
+        Color { r, g, b }
+    }
+}
 
 pub struct Sphere {
     pub center: Vec3,
     pub radius: f64,
+    pub color: Color,
 }
 
 impl Sphere {
-    pub fn new(center:Vec3, radius: f64) -> Self {
-        Sphere { center, radius}
+    pub fn new(center:Vec3, radius: f64, color:Color ) -> Self {
+        Sphere { center, radius, color }
     }
 }
 
