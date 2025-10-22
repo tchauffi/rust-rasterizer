@@ -1,10 +1,10 @@
 mod vec3;
-mod ray;
 mod sphere;
 mod camera;
+mod ray;
 use vec3::Vec3;
-use ray::Ray;
 use sphere::Sphere;
+use sphere::Color;
 use camera::Camera;
 
 fn main() {
@@ -14,19 +14,20 @@ fn main() {
     
     // Create camera
     let camera = Camera::new(
-        Vec3::new(0.0, 0.0, 0.0),      // position: camera at origin
-        Vec3::new(0.0, 0.0, -1.0),     // look_direction: looking down -Z axis
-        Vec3::new(0.0, 1.0, 0.0),      // up: Y is up
-        90.0,                           // fov: 90 degree field of view
-        width as f64,                   // width
-        height as f64                   // height
+        Vec3::new(0.0, 0.0, 0.0),
+        Vec3::new(0.0, 0.0, -1.0),
+        Vec3::new(0.0, 1.0, 0.0),
+        90.0,
+        width as f64, 
+        height as f64 
     );
     
     // Create sphere in front of camera
-    let sphere = Sphere::new(
-        Vec3::new(0.0, 0.0, -5.0),     // center: 5 units in front
-        1.0                             // radius: 1 unit
-    );
+    let spheres = vec![
+        Sphere::new(Vec3::new(0.0, 0.0, -5.0), 1.0, Color::new(255, 0, 0)),
+        Sphere::new(Vec3::new(2.0, 0.0, -6.0), 0.5, Color::new(0, 255, 0)),
+        Sphere::new(Vec3::new(-2.0, 0.0, -4.0), 1.5, Color::new(0, 0, 255)),
+    ];
     
     // Start PPM file
     println!("P3");
@@ -41,9 +42,11 @@ fn main() {
             
             let ray = camera.get_ray(u, v);
             
-            let color = if sphere.hit(&ray) {
-                // Hit: red sphere
-                Vec3::new(255.0, 0.0, 0.0)
+            let color = if spheres.iter().any(|sphere| sphere.hit(&ray)) {
+                // Hit: red color
+                spheres.iter().find(|sphere| sphere.hit(&ray)).map_or(Vec3::new(255.0, 0.0, 0.0), |sphere| {
+                    Vec3::new(sphere.color.r as f64, sphere.color.g as f64, sphere.color.b as f64)
+                })
             } else {
                 // Miss: blue gradient background
                 let t = 0.5 * (ray.direction.y + 1.0);
