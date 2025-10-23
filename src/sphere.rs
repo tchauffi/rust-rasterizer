@@ -16,18 +16,29 @@ impl Color {
     }
 }
 
+pub struct Material {
+    pub color: Color,
+    pub emissive: f64,
+}
+
+impl Material {
+    pub fn new(color: Color, emissive: f64) -> Self {
+        Material { color, emissive }
+    }
+}
+
 pub struct Sphere {
     pub center: Vec3,
     pub radius: f64,
-    pub color: Color,
+    pub material: Material,
 }
 
 impl Sphere {
-    pub fn new(center: Vec3, radius: f64, color: Color) -> Self {
+    pub fn new(center: Vec3, radius: f64, material: Material) -> Self {
         Sphere {
             center,
             radius,
-            color,
+            material,
         }
     }
 }

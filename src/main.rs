@@ -4,6 +4,7 @@ mod sphere;
 mod vec3;
 mod hit;
 use camera::Camera;
+use sphere::Material;
 use sphere::Color;
 use sphere::Sphere;
 use vec3::Vec3;
@@ -19,16 +20,16 @@ fn main() {
         Vec3::new(0.0, 0.0, 0.0),
         Vec3::new(0.0, 0.0, -1.0),
         Vec3::new(0.0, 1.0, 0.0),
-        90.0,
+        60.0,
         width as f64,
         height as f64,
     );
 
     // Create sphere in front of camera
     let spheres = vec![
-        Sphere::new(Vec3::new(0.0, 0.0, 5.0), 1.0, Color::new(255, 0, 0)),
-        Sphere::new(Vec3::new(2.0, 0.0, 6.0), 1.0, Color::new(0, 255, 0)),
-        Sphere::new(Vec3::new(-1.0, 0.0, 3.0), 1.0, Color::new(0, 0, 255)),
+        Sphere::new(Vec3::new(0.0, 0.0, 5.0), 1.0, Material { color: Color::new(255, 0, 0), emissive: 0.0 }),
+        Sphere::new(Vec3::new(2.0, 0.0, 6.0), 1.0, Material { color: Color { r: 0, g: 255, b: 0 }, emissive: 0.0 }),
+        Sphere::new(Vec3::new(-1.0, 0.0, 3.0), 1.0, Material { color: Color { r: 0, g: 0, b: 255 }, emissive: 0.0 }),
     ];
 
     // Start PPM file
@@ -57,7 +58,7 @@ fn main() {
 
             if hit_idx.is_some() {
                 let sphere = &spheres[hit_idx.unwrap()];
-                println!("{} {} {}", sphere.color.r, sphere.color.g, sphere.color.b);
+                println!("{} {} {}", sphere.material.color.r, sphere.material.color.g, sphere.material.color.b);
             } else {
                 // Background color
                 println!("135 206 235"); // Sky blue
