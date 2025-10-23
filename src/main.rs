@@ -2,10 +2,12 @@ mod camera;
 mod ray;
 mod sphere;
 mod vec3;
+mod hit;
 use camera::Camera;
 use sphere::Color;
 use sphere::Sphere;
 use vec3::Vec3;
+use hit::HitRecord;
 
 fn main() {
     // Setup
@@ -26,7 +28,7 @@ fn main() {
     let spheres = vec![
         Sphere::new(Vec3::new(0.0, 0.0, 5.0), 1.0, Color::new(255, 0, 0)),
         Sphere::new(Vec3::new(2.0, 0.0, 6.0), 1.0, Color::new(0, 255, 0)),
-        Sphere::new(Vec3::new(-1.0, 0.0, 2.0), 1.0, Color::new(0, 0, 255)),
+        Sphere::new(Vec3::new(-1.0, 0.0, 3.0), 1.0, Color::new(0, 0, 255)),
     ];
 
     // Start PPM file
@@ -46,11 +48,10 @@ fn main() {
             let mut hit_idx: Option<usize> = None;
 
             for (idx, sphere) in spheres.iter().enumerate() {
-                if let Some(t) = sphere.hit(&ray) {
-                    if t < closest_t {
-                        closest_t = t;
-                        hit_idx = Some(idx);
-                    }
+                let hit_record: HitRecord = sphere.hit(&ray);
+                if hit_record.is_hit && hit_record.dst < closest_t {
+                    closest_t = hit_record.dst;
+                    hit_idx = Some(idx);
                 }
             }
 
@@ -61,9 +62,6 @@ fn main() {
                 // Background color
                 println!("135 206 235"); // Sky blue
             }
-
-
-
         }
     }
 }

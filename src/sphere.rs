@@ -2,6 +2,7 @@ use core::str;
 
 use crate::ray::Ray;
 use crate::vec3::Vec3;
+use crate::hit::HitRecord;
 
 pub struct Color {
     pub r: u8,
@@ -32,7 +33,7 @@ impl Sphere {
 }
 
 impl Sphere {
-    pub fn hit(&self, ray: &Ray) -> Option<f64> {
+    pub fn hit(&self, ray: &Ray) -> HitRecord {
         let oc = ray.origin - self.center;
         let a = ray.direction.dot(&ray.direction);
         let b = 2.0 * ray.direction.dot(&oc);
@@ -43,12 +44,14 @@ impl Sphere {
         if discriminant >= 0.0 {
             let t = (-b - discriminant.sqrt()) / (2.0 * a);
             if t > 0.0 {
-                Some(t)
+                let hit_point = ray.at(t);
+                let normal = (hit_point - self.center).normalize();
+                HitRecord::new(true, t, hit_point, normal)
             } else {
-                None
+                HitRecord::new(false, f64::INFINITY, Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 0.0))
             }
         } else {
-            None
+            HitRecord::new(false, f64::INFINITY, Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 0.0))
         }
     }
 }
