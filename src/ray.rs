@@ -1,4 +1,4 @@
-use crate::vec3::Vec3; 
+use crate::vec3::Vec3;
 
 pub struct Ray {
     pub origin: Vec3,
@@ -19,6 +19,10 @@ impl Ray {
 
 impl std::fmt::Display for Ray {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "Ray(origin: {}, direction: {})", self.origin, self.direction)
+        write!(
+            f,
+            "Ray(origin: {}, direction: {})",
+            self.origin, self.direction
+        )
     }
 }

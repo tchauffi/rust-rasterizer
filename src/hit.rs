@@ -1,6 +1,5 @@
 use crate::vec3::Vec3;
-
-
+#[allow(dead_code)]
 pub struct HitRecord {
     pub is_hit: bool,
     pub dst: f64,

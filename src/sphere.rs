@@ -1,8 +1,6 @@
-use core::str;
-
+use crate::hit::HitRecord;
 use crate::ray::Ray;
 use crate::vec3::Vec3;
-use crate::hit::HitRecord;
 
 pub struct Color {
     pub r: u8,
@@ -16,14 +14,20 @@ impl Color {
     }
 }
 
+#[allow(dead_code)]
 pub struct Material {
     pub color: Color,
-    pub emissive: f64,
+    pub emissive_color: Color,
+    pub emissive_strength: f64,
 }
 
 impl Material {
-    pub fn new(color: Color, emissive: f64) -> Self {
-        Material { color, emissive }
+    pub fn new(color: Color, emissive_color: Color, emissive_strength: f64) -> Self {
+        Material {
+            color,
+            emissive_color,
+            emissive_strength,
+        }
     }
 }
 
@@ -59,10 +63,20 @@ impl Sphere {
                 let normal = (hit_point - self.center).normalize();
                 HitRecord::new(true, t, hit_point, normal)
             } else {
-                HitRecord::new(false, f64::INFINITY, Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 0.0))
+                HitRecord::new(
+                    false,
+                    f64::INFINITY,
+                    Vec3::new(0.0, 0.0, 0.0),
+                    Vec3::new(0.0, 0.0, 0.0),
+                )
             }
         } else {
-            HitRecord::new(false, f64::INFINITY, Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 0.0))
+            HitRecord::new(
+                false,
+                f64::INFINITY,
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(0.0, 0.0, 0.0),
+            )
         }
     }
 }

@@ -1,14 +1,14 @@
 mod camera;
+mod hit;
 mod ray;
 mod sphere;
 mod vec3;
-mod hit;
 use camera::Camera;
-use sphere::Material;
+use hit::HitRecord;
 use sphere::Color;
+use sphere::Material;
 use sphere::Sphere;
 use vec3::Vec3;
-use hit::HitRecord;
 
 fn main() {
     // Setup
@@ -26,10 +26,22 @@ fn main() {
     );
 
     // Create sphere in front of camera
-    let spheres = vec![
-        Sphere::new(Vec3::new(0.0, 0.0, 5.0), 1.0, Material { color: Color::new(255, 0, 0), emissive: 0.0 }),
-        Sphere::new(Vec3::new(2.0, 0.0, 6.0), 1.0, Material { color: Color { r: 0, g: 255, b: 0 }, emissive: 0.0 }),
-        Sphere::new(Vec3::new(-1.0, 0.0, 3.0), 1.0, Material { color: Color { r: 0, g: 0, b: 255 }, emissive: 0.0 }),
+    let spheres = [
+        Sphere::new(
+            Vec3::new(0.0, 0.0, 5.0),
+            1.0,
+            Material::new(Color::new(255, 0, 0), Color::new(0, 0, 0), 0.0),
+        ),
+        Sphere::new(
+            Vec3::new(2.0, 0.0, 6.0),
+            1.0,
+            Material::new(Color::new(0, 255, 0), Color::new(0, 0, 0), 0.0),
+        ),
+        Sphere::new(
+            Vec3::new(-1.0, 0.0, 3.0),
+            1.0,
+            Material::new(Color::new(0, 0, 255), Color::new(0, 0, 0), 0.0),
+        ),
     ];
 
     // Start PPM file
@@ -44,7 +56,7 @@ fn main() {
             let v = j as f64 / (height - 1) as f64;
 
             let ray = camera.get_ray(u, v);
-            
+
             let mut closest_t = f64::INFINITY;
             let mut hit_idx: Option<usize> = None;
 
@@ -56,9 +68,12 @@ fn main() {
                 }
             }
 
-            if hit_idx.is_some() {
-                let sphere = &spheres[hit_idx.unwrap()];
-                println!("{} {} {}", sphere.material.color.r, sphere.material.color.g, sphere.material.color.b);
+            if let Some(idx) = hit_idx {
+                let sphere = &spheres[idx];
+                println!(
+                    "{} {} {}",
+                    sphere.material.color.r, sphere.material.color.g, sphere.material.color.b
+                );
             } else {
                 // Background color
                 println!("135 206 235"); // Sky blue

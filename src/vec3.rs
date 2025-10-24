@@ -1,6 +1,6 @@
 use std::ops::Neg;
 
-#[derive(Debug, Copy, Clone)] 
+#[derive(Debug, Copy, Clone)]
 pub struct Vec3 {
     pub x: f64,
     pub y: f64,

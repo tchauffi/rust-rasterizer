@@ -1,7 +1,7 @@
 use crate::ray::Ray;
 use crate::vec3::Vec3;
 
-pub struct Camera{
+pub struct Camera {
     pub position: Vec3,
     pub look_direction: Vec3,
     pub up: Vec3,
@@ -11,7 +11,14 @@ pub struct Camera{
 }
 
 impl Camera {
-    pub fn new(position: Vec3, look_direction: Vec3, up: Vec3, fov: f64, width: f64, height: f64) -> Self {
+    pub fn new(
+        position: Vec3,
+        look_direction: Vec3,
+        up: Vec3,
+        fov: f64,
+        width: f64,
+        height: f64,
+    ) -> Self {
         Camera {
             position,
             look_direction,
@@ -46,7 +53,10 @@ impl Camera {
 
 impl std::fmt::Display for Camera {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "Camera(position: {}, look_direction: {}, up: {}, fov: {}, width: {}, height: {})",
-               self.position, self.look_direction, self.up, self.fov, self.width, self.height)
+        write!(
+            f,
+            "Camera(position: {}, look_direction: {}, up: {}, fov: {}, width: {}, height: {})",
+            self.position, self.look_direction, self.up, self.fov, self.width, self.height
+        )
     }
 }
