@@ -25,6 +25,10 @@ fn main() {
         height as f64,
     );
 
+    // Add light sources
+    let light_direction = Vec3::new(-0.5, -1.0, -1.0).normalize();
+    let ambiant_strength = 0.4;
+
     // Create sphere in front of camera
     let spheres = [
         Sphere::new(
@@ -59,21 +63,29 @@ fn main() {
 
             let mut closest_t = f64::INFINITY;
             let mut hit_idx: Option<usize> = None;
+            let mut hit_rec: Option<HitRecord> = None;
 
             for (idx, sphere) in spheres.iter().enumerate() {
                 let hit_record: HitRecord = sphere.hit(&ray);
                 if hit_record.is_hit && hit_record.dst < closest_t {
                     closest_t = hit_record.dst;
+                    hit_rec = Some(hit_record);
                     hit_idx = Some(idx);
                 }
             }
 
-            if let Some(idx) = hit_idx {
-                let sphere = &spheres[idx];
-                println!(
-                    "{} {} {}",
-                    sphere.material.color.r, sphere.material.color.g, sphere.material.color.b
-                );
+            if let Some(rec) = hit_rec {
+                let diffuse = (-light_direction).dot(&rec.normal).max(0.0);
+
+                let ligthing = ambiant_strength + (1.0 - ambiant_strength) * diffuse.powf(2.0);
+
+                let sphere = &spheres[hit_idx.unwrap()];
+
+                let r = (sphere.material.color.r as f64 * ligthing) as u8;
+                let g = (sphere.material.color.g as f64 * ligthing) as u8;
+                let b = (sphere.material.color.b as f64 * ligthing) as u8;
+
+                println!("{} {} {}", r, g, b);
             } else {
                 // Background color
                 println!("135 206 235"); // Sky blue
