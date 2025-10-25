@@ -1,3 +1,4 @@
+use rand::Rng;
 use std::ops::Neg;
 
 #[derive(Debug, Copy, Clone)]
@@ -17,20 +18,44 @@ impl Vec3 {
     pub fn length(&self) -> f64 {
         (self.x * self.x + self.y * self.y + self.z * self.z).sqrt()
     }
-}
 
-impl Vec3 {
     pub fn dot(&self, other: &Vec3) -> f64 {
         self.x * other.x + self.y * other.y + self.z * other.z
     }
-}
 
-impl Vec3 {
     pub fn cross(&self, other: &Vec3) -> Vec3 {
         Vec3 {
             x: self.y * other.z - self.z * other.y,
             y: self.z * other.x - self.x * other.z,
             z: self.x * other.y - self.y * other.x,
+        }
+    }
+
+    pub fn normalize(&self) -> Vec3 {
+        let len = self.length();
+        *self / len
+    }
+
+    pub fn random_in_unit_sphere() -> Vec3 {
+        let mut rng = rand::rng();
+        loop {
+            let p = Vec3::new(
+                rng.random_range(-1.0..1.0),
+                rng.random_range(-1.0..1.0),
+                rng.random_range(-1.0..1.0),
+            );
+            if p.length() * p.length() < 1.0 {
+                return p;
+            }
+        }
+    }
+
+    pub fn random_in_hemisphere(normal: &Vec3) -> Vec3 {
+        let in_unit_sphere = Vec3::random_in_unit_sphere();
+        if in_unit_sphere.dot(normal) > 0.0 {
+            in_unit_sphere
+        } else {
+            -in_unit_sphere
         }
     }
 }
@@ -80,13 +105,6 @@ impl std::ops::Div<f64> for Vec3 {
             y: self.y / scalar,
             z: self.z / scalar,
         }
-    }
-}
-
-impl Vec3 {
-    pub fn normalize(&self) -> Vec3 {
-        let len = self.length();
-        *self / len
     }
 }
 
