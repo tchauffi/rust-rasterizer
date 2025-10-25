@@ -1,28 +1,15 @@
 use crate::hit::HitRecord;
 use crate::ray::Ray;
 use crate::vec3::Vec3;
-
-pub struct Color {
-    pub r: u8,
-    pub g: u8,
-    pub b: u8,
-}
-
-impl Color {
-    pub fn new(r: u8, g: u8, b: u8) -> Self {
-        Color { r, g, b }
-    }
-}
-
 #[allow(dead_code)]
 pub struct Material {
-    pub color: Color,
-    pub emissive_color: Color,
+    pub color: Vec3,
+    pub emissive_color: Vec3,
     pub emissive_strength: f64,
 }
 
 impl Material {
-    pub fn new(color: Color, emissive_color: Color, emissive_strength: f64) -> Self {
+    pub fn new(color: Vec3, emissive_color: Vec3, emissive_strength: f64) -> Self {
         Material {
             color,
             emissive_color,
@@ -45,9 +32,6 @@ impl Sphere {
             material,
         }
     }
-}
-
-impl Sphere {
     pub fn hit(&self, ray: &Ray) -> HitRecord {
         let oc = ray.origin - self.center;
         let a = ray.direction.dot(&ray.direction);

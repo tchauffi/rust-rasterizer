@@ -6,14 +6,13 @@ mod vec3;
 use camera::Camera;
 use hit::HitRecord;
 use ray::Ray;
-use sphere::Color;
 use sphere::Material;
 use sphere::Sphere;
 use vec3::Vec3;
 
-fn ray_color(ray: &Ray, objects: &[Sphere], depth: u32) -> Color {
+fn ray_color(ray: &Ray, objects: &[Sphere], depth: u32) -> Vec3 {
     if depth == 0 {
-        return Color::new(0, 0, 0);
+        return Vec3::new(0.0, 0.0, 0.0);
     }
 
     let mut closest_t = f64::INFINITY;
@@ -39,15 +38,15 @@ fn ray_color(ray: &Ray, objects: &[Sphere], depth: u32) -> Color {
         let incoming_light = ray_color(&bounced_ray, objects, depth - 1);
 
         let albedo = Vec3::new(
-            sphere.material.color.r as f64 / 255.0,
-            sphere.material.color.g as f64 / 255.0,
-            sphere.material.color.b as f64 / 255.0,
+            sphere.material.color.x,
+            sphere.material.color.y,
+            sphere.material.color.z,
         );
 
-        Color::new(
-            (incoming_light.r as f64 * albedo.x * 0.5) as u8,
-            (incoming_light.g as f64 * albedo.y * 0.5) as u8,
-            (incoming_light.b as f64 * albedo.z * 0.5) as u8,
+        Vec3::new(
+            albedo.x * incoming_light.x,
+            albedo.y * incoming_light.y,
+            albedo.z * incoming_light.z,
         )
     } else {
         let unit_direction = ray.direction.normalize();
@@ -56,7 +55,7 @@ fn ray_color(ray: &Ray, objects: &[Sphere], depth: u32) -> Color {
         let g = (1.0 - t) * 1.0 + t * 0.7;
         let b = (1.0 - t) * 1.0 + t * 1.0;
 
-        Color::new((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8)
+        Vec3::new(r, g, b)
     }
 }
 
@@ -80,17 +79,17 @@ fn main() {
         Sphere::new(
             Vec3::new(0.0, 0.0, 5.0),
             1.0,
-            Material::new(Color::new(255, 0, 0), Color::new(0, 0, 0), 0.0),
+            Material::new(Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 0.0), 0.0),
         ),
         Sphere::new(
             Vec3::new(2.0, 0.0, 6.0),
             1.0,
-            Material::new(Color::new(0, 255, 0), Color::new(0, 0, 0), 0.0),
+            Material::new(Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 0.0), 0.0),
         ),
         Sphere::new(
             Vec3::new(-1.0, 0.0, 3.0),
             1.0,
-            Material::new(Color::new(0, 0, 255), Color::new(0, 0, 0), 0.0),
+            Material::new(Vec3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, 0.0), 0.0),
         ),
     ];
 
@@ -112,9 +111,9 @@ fn main() {
                 let ray = camera.get_ray(u, v);
                 let sample_color = ray_color(&ray, &spheres, 5);
 
-                pixel_color.x += sample_color.r as f64;
-                pixel_color.y += sample_color.g as f64;
-                pixel_color.z += sample_color.b as f64;
+                pixel_color.x += sample_color.x;
+                pixel_color.y += sample_color.y;
+                pixel_color.z += sample_color.z;
             }
 
             // Averaging + Gamma correction + Color clamping
