@@ -5,6 +5,7 @@ mod sphere;
 mod vec3;
 use camera::Camera;
 use hit::HitRecord;
+use rand::Rng;
 use ray::Ray;
 use sphere::Material;
 use sphere::Sphere;
@@ -19,6 +20,8 @@ fn ray_color(ray: &Ray, objects: &[Sphere], depth: u32) -> Vec3 {
     let mut hit_record: Option<HitRecord> = None;
     let mut hit_idx: Option<usize> = None;
 
+    let mut rng = rand::rng();
+
     for (idx, object) in objects.iter().enumerate() {
         let temp_rec = object.hit(ray);
         if temp_rec.is_hit && temp_rec.dst < closest_t {
@@ -32,7 +35,12 @@ fn ray_color(ray: &Ray, objects: &[Sphere], depth: u32) -> Vec3 {
         let sphere = &objects[hit_idx.unwrap()];
 
         let bounce_direction = Vec3::random_in_hemisphere(&rec.normal);
-        let bounce_origin = rec.hit_point + rec.normal * 1e-4;
+        let bounce_origin = rec.hit_point
+            + Vec3::new(
+                rng.random::<f64>(),
+                rng.random::<f64>(),
+                rng.random::<f64>(),
+            ) * 1e-3;
         let bounced_ray = Ray::new(bounce_origin, bounce_direction);
 
         let incoming_light = ray_color(&bounced_ray, objects, depth - 1);
@@ -102,14 +110,14 @@ fn main() {
     for j in (0..height).rev() {
         for i in 0..width {
             let mut pixel_color = Vec3::new(0.0, 0.0, 0.0);
-            let samples_per_pixel = 10;
+            let samples_per_pixel = 20;
 
             for _ in 0..samples_per_pixel {
                 let u = (i as f64 + rand::random::<f64>()) / (width - 1) as f64;
                 let v = (j as f64 + rand::random::<f64>()) / (height - 1) as f64;
 
                 let ray = camera.get_ray(u, v);
-                let sample_color = ray_color(&ray, &spheres, 5);
+                let sample_color = ray_color(&ray, &spheres, 10);
 
                 pixel_color.x += sample_color.x;
                 pixel_color.y += sample_color.y;

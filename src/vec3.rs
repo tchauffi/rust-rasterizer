@@ -96,6 +96,18 @@ impl std::ops::Mul<f64> for Vec3 {
     }
 }
 
+impl std::ops::Mul<Vec3> for Vec3 {
+    type Output = Vec3;
+
+    fn mul(self, other: Vec3) -> Vec3 {
+        Vec3 {
+            x: self.x * other.x,
+            y: self.y * other.y,
+            z: self.z * other.z,
+        }
+    }
+}
+
 impl std::ops::Div<f64> for Vec3 {
     type Output = Vec3;
 
