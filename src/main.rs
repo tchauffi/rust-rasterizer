@@ -33,7 +33,7 @@ fn ray_color(ray: &Ray, objects: &[Sphere], depth: u32) -> Color {
         let sphere = &objects[hit_idx.unwrap()];
 
         let bounce_direction = Vec3::random_in_hemisphere(&rec.normal);
-        let bounce_origin = rec.hit_point;
+        let bounce_origin = rec.hit_point + rec.normal * 1e-4;
         let bounced_ray = Ray::new(bounce_origin, bounce_direction);
 
         let incoming_light = ray_color(&bounced_ray, objects, depth - 1);
