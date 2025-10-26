@@ -131,7 +131,7 @@ fn ray_color(ray: &Ray, objects: &[&dyn Hittable], lights: &[Light], depth: u32)
 
         // Blue-to-white gradient
         let white = Vec3::new(1.0, 1.0, 1.0);
-        let blue = Vec3::new(0.5, 0.7, 1.0);
+        let blue = Vec3::new(0.2, 0.3, 0.8);
 
         white * (1.0 - t) + blue * t
     }
@@ -178,7 +178,7 @@ fn main() {
     bunny.rotate_y(180.0);
 
     // Scale bunny up 10x and move it in front of camera
-    bunny.transform(10.0, Vec3::new(0.0, -1.0, 5.0));
+    bunny.transform(10.0, Vec3::new(0.0, -1.0, 4.0));
 
     eprintln!(
         "Transformed bunny bounding box: min=({:.3}, {:.3}, {:.3}), max=({:.3}, {:.3}, {:.3})",
