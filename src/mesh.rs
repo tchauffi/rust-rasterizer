@@ -43,8 +43,8 @@ impl Mesh {
         let reader = BufReader::new(file);
         let mut vertices = Vec::new();
         let mut faces = Vec::new();
-        let normals = Vec::new();
-        let texture_coords = Vec::new();
+        let mut normals = Vec::new();
+        let mut texture_coords = Vec::new();
 
         for line in reader.lines() {
             let line = line?;
@@ -74,17 +74,31 @@ impl Mesh {
                         faces.push(vertex_index);
                     }
                 }
+                "vn" => {
+                    if parts.len() >= 4 {
+                        let x = parts[1].parse::<f64>()?;
+                        let y = parts[2].parse::<f64>()?;
+                        let z = parts[3].parse::<f64>()?;
+                        normals.push(Vec3::new(x, y, z));
+                    }
+                }
+                "vt" => {
+                    if parts.len() >= 3 {
+                        let u = parts[1].parse::<f64>()?;
+                        let v = parts[2].parse::<f64>()?;
+                        texture_coords.push((u, v));
+                    }
+                }
                 _ => {}
             }
         }
 
-        Ok(Mesh::new(
-            vertices,
-            faces,
-            normals,
-            texture_coords,
-            material,
-        ))
+        let mut mesh = Mesh::new(vertices, faces, normals, texture_coords, material);
+        if mesh.normals.is_empty() {
+            mesh.compute_normals();
+        }
+        eprintln!("Computed normals for mesh: {} normals", mesh.normals.len());
+        Ok(mesh)
     }
 
     /// Transform the mesh by scaling and translating
@@ -103,6 +117,7 @@ impl Mesh {
         let cos_theta = angle_radians.cos();
         let sin_theta = angle_radians.sin();
 
+        // Rotate vertices
         for vertex in &mut self.vertices {
             let x = vertex.x;
             let z = vertex.z;
@@ -116,8 +131,50 @@ impl Mesh {
             // y stays the same
         }
 
+        // Rotate normals as well!
+        for normal in &mut self.normals {
+            let x = normal.x;
+            let z = normal.z;
+
+            normal.x = cos_theta * x + sin_theta * z;
+            normal.z = -sin_theta * x + cos_theta * z;
+            // y stays the same
+        }
+
         // Recompute bounding box after rotation
         self.bounding_box = AABB::from_vertices(&self.vertices);
+    }
+    pub fn compute_normals(&mut self) {
+        self.normals.clear();
+        self.normals
+            .resize(self.vertices.len(), Vec3::new(0.0, 0.0, 0.0));
+        let mut counts = vec![0; self.vertices.len()];
+
+        for i in (0..self.faces.len()).step_by(3) {
+            if i + 2 >= self.faces.len() {
+                break;
+            }
+
+            let v0 = self.vertices[self.faces[i]];
+            let v1 = self.vertices[self.faces[i + 1]];
+            let v2 = self.vertices[self.faces[i + 2]];
+
+            let edge1 = v1 - v0;
+            let edge2 = v2 - v0;
+            let face_normal = edge1.cross(&edge2).normalize();
+
+            for j in 0..3 {
+                let vertex_index = self.faces[i + j];
+                self.normals[vertex_index] = self.normals[vertex_index] + face_normal;
+                counts[vertex_index] += 1;
+            }
+        }
+
+        for (i, _) in counts.iter().enumerate().take(self.normals.len()) {
+            if counts[i] > 0 {
+                self.normals[i] = (self.normals[i] / counts[i] as f64).normalize();
+            }
+        }
     }
 }
 
@@ -181,19 +238,18 @@ impl Hittable for Mesh {
             if t > 1e-8 && t < closest_t {
                 closest_t = t;
                 let hit_point = ray.at(t);
-                let normal = edge1.cross(&edge2).normalize();
-
-                // Ensure normal faces the ray
-                let outward_normal = if ray.direction.dot(&normal) < 0.0 {
-                    normal
-                } else {
-                    -normal
-                };
+                let i0 = self.faces[i];
+                let i1 = self.faces[i + 1];
+                let i2 = self.faces[i + 2];
+                let normal = (self.normals[i0] * (1.0 - u - v)
+                    + self.normals[i1] * u
+                    + self.normals[i2] * v)
+                    .normalize();
 
                 closest_hit = HitRecord {
                     dst: t,
                     hit_point,
-                    normal: outward_normal,
+                    normal,
                     is_hit: true,
                 };
             }
