@@ -116,7 +116,7 @@ fn ray_color(ray: &Ray, objects: &[&dyn Hittable], lights: &[Light], depth: u32)
 
         // Combine direct and indirect lighting
         // Scale down indirect to balance with direct lighting
-        let total_light = direct_light + incoming_light * 0.05; // Reduced from 0.2 to 0.05
+        let total_light = direct_light + incoming_light * 0.05;
 
         // Multiply light by material color (albedo)
         Vec3::new(
@@ -223,7 +223,7 @@ fn main() {
     for j in (0..height).rev() {
         for i in 0..width {
             let mut pixel_color = Vec3::new(0.0, 0.0, 0.0);
-            let samples_per_pixel = 50;
+            let samples_per_pixel = 5;
 
             for _ in 0..samples_per_pixel {
                 let u = (i as f64 + rand::random::<f64>()) / (width - 1) as f64;
