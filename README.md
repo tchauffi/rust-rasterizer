@@ -1,6 +1,8 @@
 # rust-rasterizer
 A rasterizer implementation in Rust
 
+![Example](doc/example.jpg)
+
 ## To do:
 
 - [X] Implement Sphere ray tracing
