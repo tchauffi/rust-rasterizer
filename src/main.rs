@@ -210,8 +210,8 @@ fn main() {
     ];
 
     let lights = [
-        Light::new_directional_light(Vec3::new(3.0, -3.0, 3.0), Vec3::new(1.0, 1.0, 1.0), 1.5),
-        Light::new_ambient_light(Vec3::new(0.1, 0.1, 0.1), 0.1),
+        Light::new_directional_light(Vec3::new(3.0, -3.0, 3.0), Vec3::new(1.0, 1.0, 1.0), 0.8),
+        Light::new_ambient_light(Vec3::new(0.1, 0.1, 0.1), 0.2),
     ];
 
     // Start PPM file
