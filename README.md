@@ -7,7 +7,8 @@ A rasterizer implementation in Rust
 
 - [X] Implement Sphere ray tracing
 - [X] Implement Light structures and enhance ray_color function for direct and indirect lighting calculations
-- [ ] Add more shapes (planes, triangles, meshes)
+- [X] Add more shapes (planes, triangles, meshes)
+- [ ] Add BVH acceleration structure
 - [ ] Optimize performance using GPU acceleration
 - [ ] Add texture mapping and material properties
 - [ ] Implement shadows and reflections
