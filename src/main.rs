@@ -1,18 +1,23 @@
+mod aabb;
 mod camera;
 mod hit;
+mod hittable;
 mod lights;
+mod mesh;
 mod ray;
 mod sphere;
 mod vec3;
 use camera::Camera;
 use hit::HitRecord;
+use hittable::Hittable;
 use lights::Light;
+use mesh::Mesh;
 use ray::Ray;
 use sphere::Material;
 use sphere::Sphere;
 use vec3::Vec3;
 
-fn ray_color(ray: &Ray, objects: &[Sphere], lights: &[Light], depth: u32) -> Vec3 {
+fn ray_color(ray: &Ray, objects: &[&dyn Hittable], lights: &[Light], depth: u32) -> Vec3 {
     if depth == 0 {
         return Vec3::new(0.0, 0.0, 0.0);
     }
@@ -32,7 +37,7 @@ fn ray_color(ray: &Ray, objects: &[Sphere], lights: &[Light], depth: u32) -> Vec
     }
 
     if let Some(rec) = hit_record {
-        let sphere = &objects[hit_idx.unwrap()];
+        let object = objects[hit_idx.unwrap()];
 
         // Calculate direct lighting from all lights
         let mut direct_light = Vec3::new(0.0, 0.0, 0.0);
@@ -106,12 +111,12 @@ fn ray_color(ray: &Ray, objects: &[Sphere], lights: &[Light], depth: u32) -> Vec
         // Recursively trace the bounced ray
         let incoming_light = ray_color(&bounced_ray, objects, lights, depth - 1);
 
-        // Get sphere's albedo (color)
-        let albedo = sphere.material.color;
+        // Get object's albedo (color)
+        let albedo = object.get_material().color;
 
         // Combine direct and indirect lighting
         // Scale down indirect to balance with direct lighting
-        let total_light = direct_light + incoming_light * 0.2;
+        let total_light = direct_light + incoming_light * 0.05; // Reduced from 0.2 to 0.05
 
         // Multiply light by material color (albedo)
         Vec3::new(
@@ -126,7 +131,7 @@ fn ray_color(ray: &Ray, objects: &[Sphere], lights: &[Light], depth: u32) -> Vec
 
         // Blue-to-white gradient
         let white = Vec3::new(1.0, 1.0, 1.0);
-        let blue = Vec3::new(0.5, 0.7, 1.0);
+        let blue = Vec3::new(0.2, 0.3, 0.8);
 
         white * (1.0 - t) + blue * t
     }
@@ -147,28 +152,66 @@ fn main() {
         height as f64,
     );
 
-    // Create sphere in front of camera
-    let spheres = [
-        Sphere::new(
-            Vec3::new(0.0, 0.0, 5.0),
-            1.0,
-            Material::new(Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 0.0), 0.0),
-        ),
-        Sphere::new(
-            Vec3::new(2.0, 0.0, 6.0),
-            1.0,
-            Material::new(Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 0.0), 0.0),
-        ),
-        Sphere::new(
-            Vec3::new(-2.0, 0.0, 6.0),
-            1.0,
-            Material::new(Vec3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, 0.0), 0.0),
-        ),
+    // Load the bunny mesh
+    let bunny_material = Material::new(Vec3::new(1.0, 1.0, 1.0), Vec3::new(0.0, 0.0, 0.0), 0.0);
+
+    let mut bunny =
+        Mesh::from_obj_file("data/bunny.obj", bunny_material).expect("Failed to load bunny.obj");
+
+    eprintln!(
+        "Loaded bunny mesh: {} vertices, {} faces",
+        bunny.vertices.len(),
+        bunny.faces.len() / 3
+    );
+
+    eprintln!(
+        "Original bunny bounding box: min=({:.3}, {:.3}, {:.3}), max=({:.3}, {:.3}, {:.3})",
+        bunny.bounding_box.min.x,
+        bunny.bounding_box.min.y,
+        bunny.bounding_box.min.z,
+        bunny.bounding_box.max.x,
+        bunny.bounding_box.max.y,
+        bunny.bounding_box.max.z
+    );
+
+    // Rotate 180 degrees around Y axis (vertical)
+    bunny.rotate_y(180.0);
+
+    // Scale bunny up 10x and move it in front of camera
+    bunny.transform(10.0, Vec3::new(0.0, -1.0, 4.0));
+
+    eprintln!(
+        "Transformed bunny bounding box: min=({:.3}, {:.3}, {:.3}), max=({:.3}, {:.3}, {:.3})",
+        bunny.bounding_box.min.x,
+        bunny.bounding_box.min.y,
+        bunny.bounding_box.min.z,
+        bunny.bounding_box.max.x,
+        bunny.bounding_box.max.y,
+        bunny.bounding_box.max.z
+    );
+
+    // Create spheres for background
+    let sphere2 = Sphere::new(
+        Vec3::new(2.0, 0.0, 6.0),
+        1.0,
+        Material::new(Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 0.0), 0.0),
+    );
+    let sphere3 = Sphere::new(
+        Vec3::new(-2.0, 0.0, 6.0),
+        1.0,
+        Material::new(Vec3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, 0.0), 0.0),
+    );
+
+    // Create array of hittable objects including the bunny
+    let objects: Vec<&dyn Hittable> = vec![
+        &bunny as &dyn Hittable,
+        &sphere2 as &dyn Hittable,
+        &sphere3 as &dyn Hittable,
     ];
 
     let lights = [
-        Light::new_directional_light(Vec3::new(3.0, -3.0, 3.0), Vec3::new(1.0, 1.0, 1.0), 1.5),
-        Light::new_ambient_light(Vec3::new(0.1, 0.1, 0.1), 0.1),
+        Light::new_directional_light(Vec3::new(3.0, -3.0, 3.0), Vec3::new(1.0, 1.0, 1.0), 0.8),
+        Light::new_ambient_light(Vec3::new(0.1, 0.1, 0.1), 0.2),
     ];
 
     // Start PPM file
@@ -187,7 +230,7 @@ fn main() {
                 let v = (j as f64 + rand::random::<f64>()) / (height - 1) as f64;
 
                 let ray = camera.get_ray(u, v);
-                let sample_color = ray_color(&ray, &spheres, &lights, 5);
+                let sample_color = ray_color(&ray, &objects, &lights, 3);
 
                 pixel_color.x += sample_color.x;
                 pixel_color.y += sample_color.y;

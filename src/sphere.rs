@@ -1,4 +1,5 @@
 use crate::hit::HitRecord;
+use crate::hittable::Hittable;
 use crate::ray::Ray;
 use crate::vec3::Vec3;
 #[allow(dead_code)]
@@ -32,7 +33,10 @@ impl Sphere {
             material,
         }
     }
-    pub fn hit(&self, ray: &Ray) -> HitRecord {
+}
+
+impl Hittable for Sphere {
+    fn hit(&self, ray: &Ray) -> HitRecord {
         let oc = ray.origin - self.center;
         let a = ray.direction.dot(&ray.direction);
         let b = 2.0 * ray.direction.dot(&oc);
@@ -62,5 +66,9 @@ impl Sphere {
                 Vec3::new(0.0, 0.0, 0.0),
             )
         }
+    }
+
+    fn get_material(&self) -> &Material {
+        &self.material
     }
 }
