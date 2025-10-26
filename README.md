@@ -1,7 +1,7 @@
 # rust-rasterizer
 A rasterizer implementation in Rust
 
-![Example](doc/example.jpg)
+![Example](doc/bunny_rotated.png)
 
 ## To do:
 
