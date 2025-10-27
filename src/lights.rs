@@ -1,6 +1,7 @@
 use crate::vec3::Vec3;
 
 #[allow(dead_code)]
+#[derive(Clone)]
 pub struct PointLight {
     pub position: Vec3,
     pub radius: f64,
@@ -19,7 +20,7 @@ impl PointLight {
         }
     }
 }
-
+#[derive(Clone)]
 pub struct DirectionalLight {
     pub direction: Vec3,
     pub color: Vec3,
@@ -35,7 +36,7 @@ impl DirectionalLight {
         }
     }
 }
-
+#[derive(Clone)]
 pub struct AmbientLight {
     pub color: Vec3,
     pub intensity: f64,
@@ -48,6 +49,7 @@ impl AmbientLight {
 }
 
 #[allow(dead_code)]
+#[derive(Clone)]
 pub enum Light {
     Point(PointLight),
     Directional(DirectionalLight),
