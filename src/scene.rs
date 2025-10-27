@@ -164,7 +164,8 @@ impl Scene {
             let indirect_light = self.trace_ray(&bounce_ray, depth - 1);
 
             let albedo = material.color;
-            direct_light * albedo + indirect_light * albedo * 0.1
+            direct_light * albedo * material.roughness
+                + indirect_light * albedo * (1.0 - material.roughness)
         } else {
             // Background gradient
             let t = 0.5 * (ray.direction.normalize().y + 1.0);

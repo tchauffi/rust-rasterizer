@@ -73,14 +73,14 @@ fn main() {
     let sphere1 = Sphere::new(
         Vec3::new(0.0, -1001.0, 0.0),
         1000.0,
-        Material::new(Vec3::new(1.0, 1.0, 1.0), 0.0),
+        Material::new(Vec3::new(1.0, 1.0, 1.0), 0.5),
     );
 
     // Create spheres for background
     let sphere2 = Sphere::new(
         Vec3::new(2.0, 0.0, 6.0),
         1.0,
-        Material::new(Vec3::new(0.0, 1.0, 0.0), 1.0),
+        Material::new(Vec3::new(0.0, 1.0, 0.0), 0.5),
     );
     let sphere3 = Sphere::new(
         Vec3::new(-2.0, 0.0, 6.0),
@@ -98,7 +98,7 @@ fn main() {
 
     let lights = [
         Light::new_directional_light(Vec3::new(3.0, -3.0, 3.0), Vec3::new(1.0, 1.0, 1.0), 0.8),
-        Light::new_ambient_light(Vec3::new(0.1, 0.1, 0.1), 0.2),
+        Light::new_ambient_light(Vec3::new(0.1, 0.1, 0.1), 0.0),
     ];
 
     let scene = Scene::new(camera, objects, lights.to_vec());
