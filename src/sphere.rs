@@ -1,23 +1,7 @@
-use crate::hit::HitRecord;
-use crate::hittable::Hittable;
+use crate::hittable::{HitRecord, Hittable};
+use crate::material::Material;
 use crate::ray::Ray;
 use crate::vec3::Vec3;
-#[allow(dead_code)]
-pub struct Material {
-    pub color: Vec3,
-    pub emissive_color: Vec3,
-    pub emissive_strength: f64,
-}
-
-impl Material {
-    pub fn new(color: Vec3, emissive_color: Vec3, emissive_strength: f64) -> Self {
-        Material {
-            color,
-            emissive_color,
-            emissive_strength,
-        }
-    }
-}
 
 pub struct Sphere {
     pub center: Vec3,

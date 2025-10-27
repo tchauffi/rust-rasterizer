@@ -3,10 +3,11 @@ use std::sync::mpsc;
 
 use anyhow::{Context, Result, anyhow};
 use bytemuck::{Pod, Zeroable};
-use rust_rasterizer::camera::Camera;
-use rust_rasterizer::mesh::Mesh;
-use rust_rasterizer::sphere::{Material, Sphere};
-use rust_rasterizer::vec3::Vec3;
+use rust_raytracer::camera::Camera;
+use rust_raytracer::material::Material;
+use rust_raytracer::mesh::Mesh;
+use rust_raytracer::sphere::Sphere;
+use rust_raytracer::vec3::Vec3;
 use wgpu::util::DeviceExt;
 
 #[repr(C)]
@@ -59,7 +60,7 @@ async fn run() -> Result<()> {
         height as f64,
     );
 
-    let bunny_material = Material::new(Vec3::new(1.0, 1.0, 1.0), Vec3::new(0.0, 0.0, 0.0), 0.0);
+    let bunny_material = Material::new(Vec3::new(1.0, 1.0, 1.0), 0.5);
     let mut bunny = Mesh::from_obj_file("data/bunny.obj", bunny_material)
         .map_err(|err| anyhow!("failed to load bunny OBJ: {err}"))?;
     bunny.rotate_y(180.0);
@@ -68,12 +69,12 @@ async fn run() -> Result<()> {
     let sphere2 = Sphere::new(
         Vec3::new(2.0, 0.0, 5.0),
         1.0,
-        Material::new(Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 0.0), 0.0),
+        Material::new(Vec3::new(0.0, 1.0, 0.0), 0.5),
     );
     let sphere3 = Sphere::new(
         Vec3::new(-1.6, 0.0, 5.0),
         1.0,
-        Material::new(Vec3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, 0.0), 0.0),
+        Material::new(Vec3::new(0.0, 0.0, 1.0), 0.5),
     );
     let spheres = [sphere2, sphere3];
 

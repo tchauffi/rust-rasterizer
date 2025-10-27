@@ -1,19 +1,18 @@
 mod aabb;
 mod camera;
-mod hit;
 mod hittable;
 mod lights;
+mod material;
 mod mesh;
 mod ray;
 mod sphere;
 mod vec3;
 use camera::Camera;
-use hit::HitRecord;
-use hittable::Hittable;
+use hittable::{HitRecord, Hittable};
 use lights::Light;
+use material::Material;
 use mesh::Mesh;
 use ray::Ray;
-use sphere::Material;
 use sphere::Sphere;
 use vec3::Vec3;
 
@@ -46,7 +45,7 @@ fn ray_color(ray: &Ray, objects: &[&dyn Hittable], lights: &[Light], depth: u32)
             match light {
                 Light::Ambient(ambient) => {
                     // Ambient light affects everything equally
-                    direct_light = direct_light + ambient.color * ambient.strength;
+                    direct_light = direct_light + ambient.color * ambient.intensity;
                 }
                 Light::Point(point_light) => {
                     // Direction from hit point to light
@@ -72,7 +71,7 @@ fn ray_color(ray: &Ray, objects: &[&dyn Hittable], lights: &[Light], depth: u32)
                         let diffuse = rec.normal.dot(&light_dir).max(0.0);
 
                         // Light intensity falls off with distance squared
-                        let attenuation = point_light.strength / (light_distance * light_distance);
+                        let attenuation = point_light.intensity / (light_distance * light_distance);
 
                         direct_light = direct_light + point_light.color * diffuse * attenuation;
                     }
@@ -97,7 +96,7 @@ fn ray_color(ray: &Ray, objects: &[&dyn Hittable], lights: &[Light], depth: u32)
                     if !in_shadow {
                         let diffuse = rec.normal.dot(&light_dir).max(0.0);
                         direct_light =
-                            direct_light + dir_light.color * dir_light.strength * diffuse;
+                            direct_light + dir_light.color * dir_light.intensity * diffuse;
                     }
                 }
             }
@@ -153,7 +152,7 @@ fn main() {
     );
 
     // Load the bunny mesh
-    let bunny_material = Material::new(Vec3::new(1.0, 1.0, 1.0), Vec3::new(0.0, 0.0, 0.0), 0.0);
+    let bunny_material = Material::new(Vec3::new(1.0, 1.0, 1.0), 0.5);
 
     let mut bunny =
         Mesh::from_obj_file("data/bunny.obj", bunny_material).expect("Failed to load bunny.obj");
@@ -194,12 +193,12 @@ fn main() {
     let sphere2 = Sphere::new(
         Vec3::new(2.0, 0.0, 6.0),
         1.0,
-        Material::new(Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 0.0), 0.0),
+        Material::new(Vec3::new(0.0, 1.0, 0.0), 0.5),
     );
     let sphere3 = Sphere::new(
         Vec3::new(-2.0, 0.0, 6.0),
         1.0,
-        Material::new(Vec3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, 0.0), 0.0),
+        Material::new(Vec3::new(0.0, 0.0, 1.0), 0.5),
     );
 
     // Create array of hittable objects including the bunny
