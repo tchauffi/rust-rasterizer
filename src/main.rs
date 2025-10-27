@@ -58,7 +58,7 @@ fn main() {
     bunny.rotate_y(180.0);
 
     // Scale bunny up 10x and move it in front of camera
-    bunny.transform(10.0, Vec3::new(0.0, -1.0, 4.0));
+    bunny.transform(10.0, Vec3::new(0.0, -1.2, 4.0));
 
     eprintln!(
         "Transformed bunny bounding box: min=({:.3}, {:.3}, {:.3}), max=({:.3}, {:.3}, {:.3})",
@@ -70,11 +70,17 @@ fn main() {
         bunny.bounding_box.max.z
     );
 
+    let sphere1 = Sphere::new(
+        Vec3::new(0.0, -1001.0, 0.0),
+        1000.0,
+        Material::new(Vec3::new(1.0, 1.0, 1.0), 0.0),
+    );
+
     // Create spheres for background
     let sphere2 = Sphere::new(
         Vec3::new(2.0, 0.0, 6.0),
         1.0,
-        Material::new(Vec3::new(0.0, 1.0, 0.0), 0.5),
+        Material::new(Vec3::new(0.0, 1.0, 0.0), 1.0),
     );
     let sphere3 = Sphere::new(
         Vec3::new(-2.0, 0.0, 6.0),
@@ -83,8 +89,12 @@ fn main() {
     );
 
     // Create array of hittable objects including the bunny
-    let objects: Vec<Box<dyn Hittable>> =
-        vec![Box::new(bunny), Box::new(sphere2), Box::new(sphere3)];
+    let objects: Vec<Box<dyn Hittable>> = vec![
+        Box::new(bunny),
+        Box::new(sphere1),
+        Box::new(sphere2),
+        Box::new(sphere3),
+    ];
 
     let lights = [
         Light::new_directional_light(Vec3::new(3.0, -3.0, 3.0), Vec3::new(1.0, 1.0, 1.0), 0.8),

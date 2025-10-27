@@ -36,7 +36,7 @@ impl Scene {
         let width = self.camera.width as usize;
         let height = self.camera.height as usize;
         let samples_per_pixel = 5;
-        let max_depth = 2;
+        let max_depth = 3;
 
         let mut image = vec![vec![Vec3::new(0.0, 0.0, 0.0); width]; height];
 
@@ -57,6 +57,13 @@ impl Scene {
 
                 // Average the color and store it
                 pixel_color = pixel_color / samples_per_pixel as f64;
+
+                pixel_color = Vec3::new(
+                    pixel_color.x.sqrt().clamp(0.0, 1.0),
+                    pixel_color.y.sqrt().clamp(0.0, 1.0),
+                    pixel_color.z.sqrt().clamp(0.0, 1.0),
+                );
+
                 image[j][i] = pixel_color;
             }
         }
@@ -70,6 +77,8 @@ impl Scene {
 
         let mut closest_hit: Option<HitRecord> = None;
         let mut closest_obj_idx: Option<usize> = None;
+
+        const EPSILON: f64 = 1e-3;
 
         // Find closest hit
         for (idx, object) in self.objects.iter().enumerate() {
@@ -102,7 +111,7 @@ impl Scene {
                         let light_dir = to_light.normalize();
 
                         // Shadow check
-                        let shadow_origin = hit.hit_point + hit.normal * 1e-4;
+                        let shadow_origin = hit.hit_point + hit.normal * EPSILON;
                         let shadow_ray = Ray::new(shadow_origin, light_dir);
                         let mut in_shadow = false;
 
@@ -127,7 +136,7 @@ impl Scene {
                         let light_dir = (dir_light.direction * -1.0).normalize();
 
                         // Shadow check
-                        let shadow_origin = hit.hit_point + hit.normal * 1e-4;
+                        let shadow_origin = hit.hit_point + hit.normal * EPSILON;
                         let shadow_ray = Ray::new(shadow_origin, light_dir);
                         let mut in_shadow = false;
 
@@ -149,13 +158,13 @@ impl Scene {
             }
 
             let bounce_direction = hit.normal + Vec3::random_in_hemisphere(&hit.normal);
-            let bounce_origin = hit.hit_point + hit.normal * 1e-4;
+            let bounce_origin = hit.hit_point + hit.normal * EPSILON;
             let bounce_ray = Ray::new(bounce_origin, bounce_direction.normalize());
 
             let indirect_light = self.trace_ray(&bounce_ray, depth - 1);
 
             let albedo = material.color;
-            direct_light * albedo + indirect_light * albedo * (1.0 - material.roughness)
+            direct_light * albedo + indirect_light * albedo * 0.1
         } else {
             // Background gradient
             let t = 0.5 * (ray.direction.normalize().y + 1.0);
