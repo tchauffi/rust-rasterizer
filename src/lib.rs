@@ -9,3 +9,6 @@ pub mod mesh;
 pub mod ray;
 pub mod sphere;
 pub mod vec3;
+
+// GPU-specific utilities
+pub mod gpu_scene;
