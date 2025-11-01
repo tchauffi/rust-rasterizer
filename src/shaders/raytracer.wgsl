@@ -214,7 +214,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let width = scene.resolution.x;
     let height = scene.resolution.y;
-    let pixel_index = global_id.y * width + global_id.x;
+    let padded_width = scene.render_config.z; // Padded width for buffer alignment
+    let pixel_index = global_id.y * padded_width + global_id.x;
 
     let samples = max(scene.render_config.x, 1u);
     let max_bounces = max(scene.render_config.y, 1u);

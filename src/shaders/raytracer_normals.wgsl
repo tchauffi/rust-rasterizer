@@ -150,7 +150,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let width = scene.resolution.x;
     let height = scene.resolution.y;
-    let pixel_index = global_id.y * width + global_id.x;
+    let padded_width = scene.render_config.z; // Padded width for buffer alignment
+    let pixel_index = global_id.y * padded_width + global_id.x;
 
     let origin = scene.camera_position.xyz;
     let u = (f32(global_id.x) + 0.5) / f32(width);

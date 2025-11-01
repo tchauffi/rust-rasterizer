@@ -12,6 +12,46 @@ use rust_raytracer::vec3::Vec3;
 use wgpu::util::DeviceExt;
 use winit::{event::*, event_loop::EventLoop, window::WindowBuilder};
 
+// UI Scene editing state
+#[derive(Clone)]
+struct SceneObject {
+    name: String,
+    position: [f32; 3],
+    radius: f32,
+    color: [f32; 3],
+    #[allow(dead_code)]
+    roughness: f32,
+    enabled: bool,
+}
+
+struct UIState {
+    // Lighting controls
+    light_direction: [f32; 3],
+    light_intensity: f32,
+    light_color: [f32; 3],
+    ambient_intensity: f32,
+    ambient_color: [f32; 3],
+
+    // Render settings
+    samples_per_pixel: u32,
+    max_bounces: u32,
+
+    // Mesh color
+    mesh_color: [f32; 3],
+
+    // Scene objects
+    objects: Vec<SceneObject>,
+
+    // Add object dialog
+    show_add_object_dialog: bool,
+    new_object_position: [f32; 3],
+    new_object_radius: f32,
+    new_object_color: [f32; 3],
+
+    // UI visibility
+    show_ui: bool,
+}
+
 struct State {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -24,17 +64,26 @@ struct State {
     uniform_buffer: wgpu::Buffer,
     output_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    bind_group_layout: wgpu::BindGroupLayout,
     compute_pipeline: wgpu::ComputePipeline,
     compute_pipeline_normals: wgpu::ComputePipeline,
 
     // Display resources
     display_pipeline: wgpu::RenderPipeline,
     display_bind_group: wgpu::BindGroup,
+    display_bind_group_layout: wgpu::BindGroupLayout,
     output_texture: wgpu::Texture,
+    sampler: wgpu::Sampler,
 
     // Scene data
     camera: Camera,
     scene_uniform: SceneUniform,
+
+    // Dynamic scene buffers
+    triangle_buffer: wgpu::Buffer,
+    sphere_buffer: wgpu::Buffer,
+    #[allow(dead_code)]
+    bunny_mesh: Mesh,
 
     // Camera control
     camera_position: Vec3,
@@ -52,6 +101,12 @@ struct State {
     frame_count: u32,
     fps_timer: std::time::Instant,
     current_fps: f32,
+
+    // UI
+    egui_renderer: egui_wgpu::Renderer,
+    egui_state: egui_winit::State,
+    egui_ctx: egui::Context,
+    ui_state: UIState,
 }
 
 impl State {
@@ -116,6 +171,13 @@ impl State {
         let samples_per_pixel = 1u32; // 1 sample for real-time interactivity
         let max_bounces = 2u32; // Reduced bounces for speed
 
+        // Calculate padded width for buffer alignment
+        let bytes_per_pixel = 16u32;
+        let unpadded_bytes_per_row = width * bytes_per_pixel;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
+        let padded_width = padded_bytes_per_row / bytes_per_pixel;
+
         let scene_uniform = SceneUniform {
             resolution: [width, height, triangle_count, sphere_count],
             camera_position: vec3_to_array(camera.position, 0.0),
@@ -126,7 +188,7 @@ impl State {
             light_color: vec3_to_array(directional_color, 0.0),
             ambient_color: vec3_to_array(ambient_color, 0.0),
             mesh_color: vec3_to_array(bunny.material.color, 1.0),
-            render_config: [samples_per_pixel, max_bounces, 0, 0],
+            render_config: [samples_per_pixel, max_bounces, padded_width, 0],
         };
 
         // Create WGPU instance
@@ -194,8 +256,12 @@ impl State {
             usage: wgpu::BufferUsages::STORAGE,
         });
 
-        let pixel_stride = (std::mem::size_of::<f32>() * 4) as u64;
-        let output_buffer_size = pixel_stride * width as u64 * height as u64;
+        // Calculate buffer size with row padding (256-byte alignment for copy operations)
+        let bytes_per_pixel = 16u32; // 4 f32s per pixel
+        let unpadded_bytes_per_row = width * bytes_per_pixel;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
+        let output_buffer_size = (padded_bytes_per_row * height) as u64;
 
         let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("output-buffer"),
@@ -313,10 +379,11 @@ impl State {
             });
 
         let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("raytracer-pipeline"),
+            label: Some("Compute Pipeline"),
             layout: Some(&compute_pipeline_layout),
             module: &shader,
             entry_point: "main",
+            compilation_options: Default::default(),
         });
 
         let compute_pipeline_normals =
@@ -325,6 +392,7 @@ impl State {
                 layout: Some(&compute_pipeline_layout),
                 module: &shader_normals,
                 entry_point: "main",
+                compilation_options: Default::default(),
             });
 
         // Create display pipeline
@@ -400,6 +468,7 @@ impl State {
                 module: &display_shader,
                 entry_point: "vs_main",
                 buffers: &[],
+                compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &display_shader,
@@ -409,6 +478,7 @@ impl State {
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
+                compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -428,6 +498,64 @@ impl State {
             multiview: None,
         });
 
+        // Initialize egui
+        let egui_ctx = egui::Context::default();
+        let egui_state = egui_winit::State::new(
+            egui_ctx.clone(),
+            egui::ViewportId::ROOT,
+            &window,
+            Some(window.scale_factor() as f32),
+            None,
+        );
+        let egui_renderer = egui_wgpu::Renderer::new(&device, surface_format, None, 1);
+
+        // Initialize UI state
+        let ui_state = UIState {
+            light_direction: [
+                directional_dir.x as f32,
+                directional_dir.y as f32,
+                directional_dir.z as f32,
+            ],
+            light_intensity: directional_strength as f32,
+            light_color: [
+                directional_color.x as f32,
+                directional_color.y as f32,
+                directional_color.z as f32,
+            ],
+            ambient_intensity: 0.2,
+            ambient_color: [0.1, 0.1, 0.1],
+            samples_per_pixel,
+            max_bounces,
+            mesh_color: [
+                bunny.material.color.x as f32,
+                bunny.material.color.y as f32,
+                bunny.material.color.z as f32,
+            ],
+            objects: vec![
+                SceneObject {
+                    name: "Green Sphere".to_string(),
+                    position: [2.0, 0.0, 5.0],
+                    radius: 1.0,
+                    color: [0.0, 1.0, 0.0],
+                    roughness: 0.5,
+                    enabled: true,
+                },
+                SceneObject {
+                    name: "Blue Sphere".to_string(),
+                    position: [-1.6, 0.0, 5.0],
+                    radius: 1.0,
+                    color: [0.0, 0.0, 1.0],
+                    roughness: 0.5,
+                    enabled: true,
+                },
+            ],
+            show_add_object_dialog: false,
+            new_object_position: [0.0, 0.0, 5.0],
+            new_object_radius: 1.0,
+            new_object_color: [1.0, 1.0, 1.0],
+            show_ui: true,
+        };
+
         let mut state = Self {
             surface,
             device,
@@ -438,11 +566,17 @@ impl State {
             uniform_buffer,
             output_buffer,
             bind_group,
+            bind_group_layout: compute_bind_group_layout,
+            triangle_buffer,
+            sphere_buffer,
+            bunny_mesh: bunny,
             compute_pipeline,
             compute_pipeline_normals,
             display_pipeline,
             display_bind_group,
+            display_bind_group_layout,
             output_texture,
+            sampler,
             camera_position: camera.position,
             camera_yaw: 180.0, // Start looking at +Z (toward the scene)
             camera_pitch: 0.0,
@@ -454,6 +588,10 @@ impl State {
             frame_count: 0,
             fps_timer: std::time::Instant::now(),
             current_fps: 0.0,
+            egui_renderer,
+            egui_state,
+            egui_ctx,
+            ui_state,
         };
 
         // Force initial camera update to sync everything
@@ -473,6 +611,101 @@ impl State {
             self.config.width = new_size.width;
             self.config.height = new_size.height;
             self.surface.configure(&self.device, &self.config);
+
+            // Recreate output buffer and texture with new size
+            // Note: Buffer size must account for row padding (256-byte alignment)
+            let bytes_per_pixel = 16u32; // 4 f32s per pixel
+            let unpadded_bytes_per_row = new_size.width * bytes_per_pixel;
+            let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+            let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
+            let buffer_size = (padded_bytes_per_row * new_size.height) as u64;
+
+            self.output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("output-buffer"),
+                size: buffer_size,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+
+            self.output_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("output-texture"),
+                size: wgpu::Extent3d {
+                    width: new_size.width,
+                    height: new_size.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba32Float,
+                usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+
+            // Recreate bind groups with new buffers/textures
+            let output_view = self
+                .output_texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
+
+            self.bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("raytracer-bind-group"),
+                layout: &self.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.uniform_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.triangle_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.sphere_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self.output_buffer.as_entire_binding(),
+                    },
+                ],
+            });
+
+            self.display_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("display-bind-group"),
+                layout: &self.display_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&output_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                ],
+            });
+
+            // Update camera aspect ratio with new dimensions
+            self.camera.width = new_size.width as f64;
+            self.camera.height = new_size.height as f64;
+
+            // Recalculate camera frame with new aspect ratio
+            let (lower_left_corner, horizontal, vertical) = camera_frame(&self.camera);
+
+            // Update scene uniform with new dimensions and camera frame
+            self.scene_uniform.resolution[0] = new_size.width;
+            self.scene_uniform.resolution[1] = new_size.height;
+            self.scene_uniform.lower_left_corner = vec3_to_array(lower_left_corner, 0.0);
+            self.scene_uniform.horizontal = vec3_to_array(horizontal, 0.0);
+            self.scene_uniform.vertical = vec3_to_array(vertical, 0.0);
+            // Update padded width for buffer alignment
+            let padded_width_pixels = padded_bytes_per_row / bytes_per_pixel;
+            self.scene_uniform.render_config[2] = padded_width_pixels;
+            self.queue.write_buffer(
+                &self.uniform_buffer,
+                0,
+                bytemuck::bytes_of(&self.scene_uniform),
+            );
         }
     }
 
@@ -522,6 +755,324 @@ impl State {
             "Mouse delta: ({:.2}, {:.2}) -> Yaw: {:.1}°, Pitch: {:.1}°",
             delta_x, delta_y, self.camera_yaw, self.camera_pitch
         );
+    }
+
+    fn update_scene_from_ui(&mut self) {
+        // Update lighting
+        let light_dir = Vec3::new(
+            self.ui_state.light_direction[0] as f64,
+            self.ui_state.light_direction[1] as f64,
+            self.ui_state.light_direction[2] as f64,
+        )
+        .normalize();
+
+        self.scene_uniform.light_direction =
+            vec3_to_array(light_dir, self.ui_state.light_intensity);
+        self.scene_uniform.light_color = [
+            self.ui_state.light_color[0],
+            self.ui_state.light_color[1],
+            self.ui_state.light_color[2],
+            0.0,
+        ];
+        self.scene_uniform.ambient_color = [
+            self.ui_state.ambient_color[0] * self.ui_state.ambient_intensity,
+            self.ui_state.ambient_color[1] * self.ui_state.ambient_intensity,
+            self.ui_state.ambient_color[2] * self.ui_state.ambient_intensity,
+            0.0,
+        ];
+        self.scene_uniform.mesh_color = [
+            self.ui_state.mesh_color[0],
+            self.ui_state.mesh_color[1],
+            self.ui_state.mesh_color[2],
+            1.0,
+        ];
+        self.scene_uniform.render_config[0] = self.ui_state.samples_per_pixel;
+        self.scene_uniform.render_config[1] = self.ui_state.max_bounces;
+
+        // Rebuild sphere buffer
+        let spheres: Vec<GpuSphere> = self
+            .ui_state
+            .objects
+            .iter()
+            .filter(|obj| obj.enabled)
+            .map(|obj| GpuSphere {
+                center_radius: [
+                    obj.position[0],
+                    obj.position[1],
+                    obj.position[2],
+                    obj.radius,
+                ],
+                color: [obj.color[0], obj.color[1], obj.color[2], 1.0],
+            })
+            .collect();
+
+        self.scene_uniform.resolution[3] = spheres.len() as u32;
+
+        // Recreate sphere buffer
+        let spheres_data: Cow<[GpuSphere]> = if spheres.is_empty() {
+            Cow::Owned(vec![GpuSphere::zeroed()])
+        } else {
+            Cow::Owned(spheres)
+        };
+
+        self.sphere_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("sphere-buffer"),
+                contents: bytemuck::cast_slice(spheres_data.as_ref()),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+
+        // Recreate bind group
+        self.bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("raytracer-bind-group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.triangle_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.sphere_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.output_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        // Upload uniform buffer
+        self.queue.write_buffer(
+            &self.uniform_buffer,
+            0,
+            bytemuck::bytes_of(&self.scene_uniform),
+        );
+    }
+
+    fn build_ui(&mut self) -> egui::FullOutput {
+        let raw_input = self.egui_state.take_egui_input(&self.window);
+        let ui_state = &mut self.ui_state;
+        let current_fps = self.current_fps;
+        let use_raytracing = self.use_raytracing;
+        let mut needs_update = false;
+
+        let full_output = self.egui_ctx.run(raw_input, |ctx| {
+            if ui_state.show_ui {
+                egui::SidePanel::right("scene_editor")
+                    .default_width(320.0)
+                    .resizable(true)
+                    .show(ctx, |ui| {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            ui.heading("Scene Editor");
+                            ui.separator();
+
+                            ui.collapsing("Lighting", |ui| {
+                                ui.label("Directional Light:");
+                                ui.horizontal(|ui| {
+                                    ui.label("Direction:");
+                                    ui.add(
+                                        egui::DragValue::new(&mut ui_state.light_direction[0])
+                                            .speed(0.01),
+                                    );
+                                    ui.add(
+                                        egui::DragValue::new(&mut ui_state.light_direction[1])
+                                            .speed(0.01),
+                                    );
+                                    ui.add(
+                                        egui::DragValue::new(&mut ui_state.light_direction[2])
+                                            .speed(0.01),
+                                    );
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("Intensity:");
+                                    ui.add(egui::Slider::new(
+                                        &mut ui_state.light_intensity,
+                                        0.0..=2.0,
+                                    ));
+                                });
+                                ui.color_edit_button_rgb(&mut ui_state.light_color);
+
+                                ui.add_space(10.0);
+                                ui.label("Ambient Light:");
+                                ui.horizontal(|ui| {
+                                    ui.label("Intensity:");
+                                    ui.add(egui::Slider::new(
+                                        &mut ui_state.ambient_intensity,
+                                        0.0..=1.0,
+                                    ));
+                                });
+                                ui.color_edit_button_rgb(&mut ui_state.ambient_color);
+                            });
+
+                            ui.add_space(10.0);
+                            ui.collapsing("Render Settings", |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label("Samples/pixel:");
+                                    ui.add(egui::Slider::new(
+                                        &mut ui_state.samples_per_pixel,
+                                        1..=16,
+                                    ));
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("Max bounces:");
+                                    ui.add(egui::Slider::new(&mut ui_state.max_bounces, 1..=5));
+                                });
+                            });
+
+                            ui.add_space(10.0);
+                            ui.collapsing("Mesh", |ui| {
+                                ui.label("Bunny Color:");
+                                ui.color_edit_button_rgb(&mut ui_state.mesh_color);
+                            });
+
+                            ui.add_space(10.0);
+                            ui.collapsing("Objects", |ui| {
+                                let mut to_remove = None;
+                                for (idx, obj) in ui_state.objects.iter_mut().enumerate() {
+                                    ui.group(|ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.checkbox(&mut obj.enabled, "");
+                                            ui.label(&obj.name);
+                                            if ui.button("🗑").clicked() {
+                                                to_remove = Some(idx);
+                                            }
+                                        });
+
+                                        if obj.enabled {
+                                            ui.horizontal(|ui| {
+                                                ui.label("Pos:");
+                                                ui.add(
+                                                    egui::DragValue::new(&mut obj.position[0])
+                                                        .speed(0.1)
+                                                        .prefix("X:"),
+                                                );
+                                                ui.add(
+                                                    egui::DragValue::new(&mut obj.position[1])
+                                                        .speed(0.1)
+                                                        .prefix("Y:"),
+                                                );
+                                                ui.add(
+                                                    egui::DragValue::new(&mut obj.position[2])
+                                                        .speed(0.1)
+                                                        .prefix("Z:"),
+                                                );
+                                            });
+                                            ui.horizontal(|ui| {
+                                                ui.label("Radius:");
+                                                ui.add(egui::Slider::new(
+                                                    &mut obj.radius,
+                                                    0.1..=5.0,
+                                                ));
+                                            });
+                                            ui.color_edit_button_rgb(&mut obj.color);
+                                        }
+                                    });
+                                }
+
+                                if let Some(idx) = to_remove {
+                                    ui_state.objects.remove(idx);
+                                    needs_update = true;
+                                }
+
+                                ui.add_space(10.0);
+                                if ui.button("+ Add Sphere").clicked() {
+                                    ui_state.show_add_object_dialog = true;
+                                }
+                            });
+
+                            ui.add_space(10.0);
+                            ui.separator();
+                            if ui.button("Apply Changes").clicked() {
+                                needs_update = true;
+                            }
+                        });
+                    });
+            }
+
+            // Add object dialog as a modal window
+            if ui_state.show_add_object_dialog {
+                egui::Window::new("Add Sphere")
+                    .collapsible(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ctx, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Position:");
+                            ui.add(
+                                egui::DragValue::new(&mut ui_state.new_object_position[0])
+                                    .speed(0.1),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut ui_state.new_object_position[1])
+                                    .speed(0.1),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut ui_state.new_object_position[2])
+                                    .speed(0.1),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Radius:");
+                            ui.add(egui::Slider::new(
+                                &mut ui_state.new_object_radius,
+                                0.1..=5.0,
+                            ));
+                        });
+                        ui.label("Color:");
+                        ui.color_edit_button_rgb(&mut ui_state.new_object_color);
+
+                        ui.horizontal(|ui| {
+                            if ui.button("Add").clicked() {
+                                ui_state.objects.push(SceneObject {
+                                    name: format!("Sphere {}", ui_state.objects.len() + 1),
+                                    position: ui_state.new_object_position,
+                                    radius: ui_state.new_object_radius,
+                                    color: ui_state.new_object_color,
+                                    roughness: 0.5,
+                                    enabled: true,
+                                });
+                                ui_state.show_add_object_dialog = false;
+                                needs_update = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                ui_state.show_add_object_dialog = false;
+                            }
+                        });
+                    });
+            }
+
+            // FPS overlay
+            egui::Area::new(egui::Id::new("fps"))
+                .fixed_pos(egui::pos2(10.0, 10.0))
+                .show(ctx, |ui| {
+                    ui.label(format!("FPS: {:.1}", current_fps));
+                    ui.label(format!(
+                        "Mode: {}",
+                        if use_raytracing {
+                            "Raytracing"
+                        } else {
+                            "Normals"
+                        }
+                    ));
+                    ui.label("Press TAB to toggle UI");
+                    ui.label("Press SPACE to toggle render mode");
+                });
+        });
+
+        self.egui_state
+            .handle_platform_output(&self.window, full_output.platform_output.clone());
+
+        // Update scene if needed
+        if needs_update {
+            self.update_scene_from_ui();
+        }
+
+        full_output
     }
 
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
@@ -578,12 +1129,18 @@ impl State {
         }
 
         // Copy buffer to texture
+        // Note: bytes_per_row must be a multiple of 256 (COPY_BYTES_PER_ROW_ALIGNMENT)
+        let bytes_per_pixel = 16u32; // 4 f32s per pixel
+        let unpadded_bytes_per_row = self.size.width * bytes_per_pixel;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
+
         encoder.copy_buffer_to_texture(
             wgpu::ImageCopyBuffer {
                 buffer: &self.output_buffer,
                 layout: wgpu::ImageDataLayout {
                     offset: 0,
-                    bytes_per_row: Some(self.size.width * 16), // 4 f32s (16 bytes) per pixel
+                    bytes_per_row: Some(padded_bytes_per_row),
                     rows_per_image: None,
                 },
             },
@@ -598,6 +1155,31 @@ impl State {
                 height: self.size.height,
                 depth_or_array_layers: 1,
             },
+        );
+
+        // Build and prepare UI
+        let full_output = self.build_ui();
+        let paint_jobs = self
+            .egui_ctx
+            .tessellate(full_output.shapes, full_output.pixels_per_point);
+        let screen_descriptor = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [self.config.width, self.config.height],
+            pixels_per_point: self.window.scale_factor() as f32,
+        };
+
+        // Update egui textures
+        for (id, image_delta) in &full_output.textures_delta.set {
+            self.egui_renderer
+                .update_texture(&self.device, &self.queue, *id, image_delta);
+        }
+
+        // Update egui buffers
+        self.egui_renderer.update_buffers(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            &paint_jobs,
+            &screen_descriptor,
         );
 
         // Display on screen
@@ -619,6 +1201,15 @@ impl State {
             rpass.set_pipeline(&self.display_pipeline);
             rpass.set_bind_group(0, &self.display_bind_group, &[]);
             rpass.draw(0..6, 0..1);
+
+            // Render egui on top
+            self.egui_renderer
+                .render(&mut rpass, &paint_jobs, &screen_descriptor);
+        }
+
+        // Free egui textures
+        for id in &full_output.textures_delta.free {
+            self.egui_renderer.free_texture(id);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -654,89 +1245,117 @@ fn main() -> Result<()> {
             Event::WindowEvent {
                 ref event,
                 window_id,
-            } if window_id == state.window.id() => match event {
-                WindowEvent::CloseRequested => target.exit(),
-                WindowEvent::Resized(physical_size) => {
-                    state.resize(*physical_size);
+            } if window_id == state.window.id() => {
+                // Let egui handle the event first
+                let event_response = state.egui_state.on_window_event(&state.window, event);
+
+                // Skip input handling if egui consumed the event
+                if event_response.consumed {
+                    state.window.request_redraw();
+                    return;
                 }
-                WindowEvent::KeyboardInput {
-                    event: key_event, ..
-                } => {
-                    if key_event.state == ElementState::Pressed {
-                        if let winit::keyboard::PhysicalKey::Code(keycode) = key_event.physical_key
-                        {
-                            if keycode == winit::keyboard::KeyCode::Space {
-                                state.use_raytracing = !state.use_raytracing;
-                                let mode = if state.use_raytracing {
-                                    "Raytracing"
+
+                match event {
+                    WindowEvent::CloseRequested => target.exit(),
+                    WindowEvent::Resized(physical_size) => {
+                        state.resize(*physical_size);
+                    }
+                    WindowEvent::KeyboardInput {
+                        event: key_event, ..
+                    } =>
+                    {
+                        #[allow(clippy::collapsible_if)]
+                        if key_event.state == ElementState::Pressed {
+                            if let winit::keyboard::PhysicalKey::Code(keycode) =
+                                key_event.physical_key
+                            {
+                                match keycode {
+                                    winit::keyboard::KeyCode::Space => {
+                                        state.use_raytracing = !state.use_raytracing;
+                                        let mode = if state.use_raytracing {
+                                            "Raytracing"
+                                        } else {
+                                            "Normals"
+                                        };
+                                        eprintln!("Switched to {} mode", mode);
+                                    }
+                                    winit::keyboard::KeyCode::Tab => {
+                                        state.ui_state.show_ui = !state.ui_state.show_ui;
+                                        eprintln!(
+                                            "UI: {}",
+                                            if state.ui_state.show_ui {
+                                                "shown"
+                                            } else {
+                                                "hidden"
+                                            }
+                                        );
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    WindowEvent::MouseInput {
+                        state: button_state,
+                        button,
+                        ..
+                    } => {
+                        if *button == winit::event::MouseButton::Left {
+                            state.mouse_pressed = *button_state == ElementState::Pressed;
+                            eprintln!(
+                                "Mouse button: {}",
+                                if state.mouse_pressed {
+                                    "PRESSED"
                                 } else {
-                                    "Normals"
-                                };
-                                eprintln!("Switched to {} mode", mode);
+                                    "RELEASED"
+                                }
+                            );
+                            if !state.mouse_pressed {
+                                state.last_mouse_pos = None;
                             }
                         }
                     }
-                }
-                WindowEvent::MouseInput {
-                    state: button_state,
-                    button,
-                    ..
-                } => {
-                    if *button == winit::event::MouseButton::Left {
-                        state.mouse_pressed = *button_state == ElementState::Pressed;
-                        eprintln!(
-                            "Mouse button: {}",
-                            if state.mouse_pressed {
-                                "PRESSED"
+                    WindowEvent::CursorMoved { position, .. } => {
+                        let current_pos = (position.x, position.y);
+
+                        if state.mouse_pressed {
+                            if let Some(last_pos) = state.last_mouse_pos {
+                                let delta_x = current_pos.0 - last_pos.0;
+                                let delta_y = current_pos.1 - last_pos.1;
+                                state.handle_mouse_motion(delta_x, delta_y);
                             } else {
-                                "RELEASED"
+                                eprintln!("Mouse pressed but no last position");
                             }
-                        );
-                        if !state.mouse_pressed {
-                            state.last_mouse_pos = None;
+                        }
+
+                        state.last_mouse_pos = Some(current_pos);
+                    }
+                    WindowEvent::RedrawRequested => {
+                        // Update camera based on elapsed time
+                        let now = std::time::Instant::now();
+                        let delta_time = (now - last_update).as_secs_f64();
+                        last_update = now;
+
+                        state.update_camera(delta_time);
+
+                        match state.render() {
+                            Ok(_) => {}
+                            Err(wgpu::SurfaceError::Lost) => {
+                                eprintln!("Surface lost, resizing...");
+                                state.resize(state.size);
+                            }
+                            Err(wgpu::SurfaceError::OutOfMemory) => {
+                                eprintln!("Out of memory!");
+                                target.exit();
+                            }
+                            Err(e) => {
+                                eprintln!("Render error: {:?}", e);
+                            }
                         }
                     }
+                    _ => {}
                 }
-                WindowEvent::CursorMoved { position, .. } => {
-                    let current_pos = (position.x, position.y);
-
-                    if state.mouse_pressed {
-                        if let Some(last_pos) = state.last_mouse_pos {
-                            let delta_x = current_pos.0 - last_pos.0;
-                            let delta_y = current_pos.1 - last_pos.1;
-                            state.handle_mouse_motion(delta_x, delta_y);
-                        } else {
-                            eprintln!("Mouse pressed but no last position");
-                        }
-                    }
-
-                    state.last_mouse_pos = Some(current_pos);
-                }
-                WindowEvent::RedrawRequested => {
-                    // Update camera based on elapsed time
-                    let now = std::time::Instant::now();
-                    let delta_time = (now - last_update).as_secs_f64();
-                    last_update = now;
-
-                    state.update_camera(delta_time);
-
-                    match state.render() {
-                        Ok(_) => {}
-                        Err(wgpu::SurfaceError::Lost) => {
-                            eprintln!("Surface lost, resizing...");
-                            state.resize(state.size);
-                        }
-                        Err(wgpu::SurfaceError::OutOfMemory) => {
-                            eprintln!("Out of memory!");
-                            target.exit();
-                        }
-                        Err(e) => {
-                            eprintln!("Render error: {:?}", e);
-                        }
-                    }
-                }
-                _ => {}
-            },
+            }
             Event::AboutToWait => {
                 state.window.request_redraw();
             }
