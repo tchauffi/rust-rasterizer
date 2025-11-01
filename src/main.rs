@@ -33,7 +33,7 @@ fn main() {
     );
 
     // Load the bunny mesh
-    let bunny_material = Material::new(Vec3::new(1.0, 1.0, 1.0), 0.5);
+    let bunny_material = Material::new(Vec3::new(1.0, 0.0, 0.0), 0.5);
 
     let mut bunny =
         Mesh::from_obj_file("data/bunny.obj", bunny_material).expect("Failed to load bunny.obj");
@@ -97,8 +97,8 @@ fn main() {
     ];
 
     let lights = [
-        Light::new_directional_light(Vec3::new(3.0, -3.0, 3.0), Vec3::new(1.0, 1.0, 1.0), 0.8),
-        Light::new_ambient_light(Vec3::new(0.1, 0.1, 0.1), 0.0),
+        Light::new_directional_light(Vec3::new(3.0, -3.0, 3.0), Vec3::new(1.0, 1.0, 1.0), 0.6),
+        Light::new_ambient_light(Vec3::new(1.0, 1.0, 1.0), 0.2),
     ];
 
     let scene = Scene::new(camera, objects, lights.to_vec());

@@ -1,6 +1,7 @@
 use crate::vec3::Vec3;
 
 #[allow(dead_code)]
+#[derive(Clone, Copy)]
 pub struct Material {
     pub color: Vec3,
     pub roughness: f64,

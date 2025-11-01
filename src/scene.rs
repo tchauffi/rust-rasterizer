@@ -35,8 +35,8 @@ impl Scene {
     pub fn render(&self) -> Vec<Vec<Vec3>> {
         let width = self.camera.width as usize;
         let height = self.camera.height as usize;
-        let samples_per_pixel = 5;
-        let max_depth = 3;
+        let samples_per_pixel = 20;
+        let max_depth = 2;
 
         let mut image = vec![vec![Vec3::new(0.0, 0.0, 0.0); width]; height];
 
@@ -72,104 +72,72 @@ impl Scene {
 
     pub fn trace_ray(&self, ray: &Ray, depth: u32) -> Vec3 {
         if depth == 0 {
-            return Vec3::new(0.0, 0.0, 0.0); // Black if max depth reached
+            return Vec3::new(0.0, 0.0, 0.0);
         }
-
-        let mut closest_hit: Option<HitRecord> = None;
-        let mut closest_obj_idx: Option<usize> = None;
 
         const EPSILON: f64 = 1e-3;
 
-        // Find closest hit
+        // Find closest hit and track which object was hit
+        if let Some((hit, obj_idx)) = self.find_closest_hit(ray) {
+            // Get material from the hit object
+            let material = *self.objects[obj_idx].get_material();
+
+            // Compute direct lighting using the lights module
+            let direct_light = self.compute_direct_lighting(&hit);
+
+            // Compute indirect lighting (global illumination)
+            let indirect_light = self.compute_indirect_lighting(&hit, depth);
+
+            let albedo = material.color;
+
+            let direct_contribution = direct_light * albedo;
+            let indirect_contribution = indirect_light * albedo * 0.5;
+
+            direct_contribution + indirect_contribution
+        } else {
+            self.background_color(ray)
+        }
+    }
+
+    fn find_closest_hit(&self, ray: &Ray) -> Option<(HitRecord, usize)> {
+        let mut closest_hit: Option<HitRecord> = None;
+        let mut closest_idx: Option<usize> = None;
+
         for (idx, object) in self.objects.iter().enumerate() {
             let hit_record = object.hit(ray);
             if hit_record.is_hit
                 && (closest_hit.is_none() || hit_record.dst < closest_hit.as_ref().unwrap().dst)
             {
                 closest_hit = Some(hit_record);
-                closest_obj_idx = Some(idx);
+                closest_idx = Some(idx);
             }
         }
 
-        // If we hit something
-        if let Some(hit) = closest_hit {
-            let material = self.objects[closest_obj_idx.unwrap()].get_material();
-
-            // Accumulate light contributions
-            let mut direct_light = Vec3::new(0.0, 0.0, 0.0);
-
-            for light in &self.lights {
-                match light {
-                    Light::Ambient(ambient) => {
-                        // Ambient light affects everything equally
-                        direct_light = direct_light + ambient.color * ambient.intensity;
-                    }
-                    Light::Point(point_light) => {
-                        // Direction from hit point to light
-                        let to_light = point_light.position - hit.hit_point;
-                        let light_distance = to_light.length();
-                        let light_dir = to_light.normalize();
-
-                        // Shadow check
-                        let shadow_origin = hit.hit_point + hit.normal * EPSILON;
-                        let shadow_ray = Ray::new(shadow_origin, light_dir);
-                        let mut in_shadow = false;
-
-                        for obj in &self.objects {
-                            let shadow_hit = obj.hit(&shadow_ray);
-                            if shadow_hit.is_hit && shadow_hit.dst < light_distance {
-                                in_shadow = true;
-                                break;
-                            }
-                        }
-
-                        if !in_shadow {
-                            // Diffuse lighting
-                            let diffuse = hit.normal.dot(&light_dir).max(0.0);
-                            let attenuation =
-                                point_light.intensity / (light_distance * light_distance);
-                            direct_light = direct_light + point_light.color * diffuse * attenuation;
-                        }
-                    }
-                    Light::Directional(dir_light) => {
-                        // Directional light comes from infinity
-                        let light_dir = (dir_light.direction * -1.0).normalize();
-
-                        // Shadow check
-                        let shadow_origin = hit.hit_point + hit.normal * EPSILON;
-                        let shadow_ray = Ray::new(shadow_origin, light_dir);
-                        let mut in_shadow = false;
-
-                        for obj in &self.objects {
-                            let shadow_hit = obj.hit(&shadow_ray);
-                            if shadow_hit.is_hit {
-                                in_shadow = true;
-                                break;
-                            }
-                        }
-
-                        if !in_shadow {
-                            let diffuse = hit.normal.dot(&light_dir).max(0.0);
-                            direct_light =
-                                direct_light + dir_light.color * dir_light.intensity * diffuse;
-                        }
-                    }
-                }
-            }
-
-            let bounce_direction = hit.normal + Vec3::random_in_hemisphere(&hit.normal);
-            let bounce_origin = hit.hit_point + hit.normal * EPSILON;
-            let bounce_ray = Ray::new(bounce_origin, bounce_direction.normalize());
-
-            let indirect_light = self.trace_ray(&bounce_ray, depth - 1);
-
-            let albedo = material.color;
-            direct_light * albedo * material.roughness
-                + indirect_light * albedo * (1.0 - material.roughness)
-        } else {
-            // Background gradient
-            let t = 0.5 * (ray.direction.normalize().y + 1.0);
-            Vec3::new(1.0, 1.0, 1.0) * (1.0 - t) + Vec3::new(0.5, 0.7, 1.0) * t
+        match (closest_hit, closest_idx) {
+            (Some(hit), Some(idx)) => Some((hit, idx)),
+            _ => None,
         }
+    }
+
+    fn compute_direct_lighting(&self, hit: &HitRecord) -> Vec3 {
+        self.lights
+            .iter()
+            .map(|light| light.compute_contribution(hit, &self.objects))
+            .fold(Vec3::new(0.0, 0.0, 0.0), |acc, contrib| acc + contrib)
+    }
+
+    fn compute_indirect_lighting(&self, hit: &HitRecord, depth: u32) -> Vec3 {
+        const EPSILON: f64 = 1e-3;
+
+        let bounce_direction = hit.normal + Vec3::random_in_hemisphere(&hit.normal);
+        let bounce_origin = hit.hit_point + hit.normal * EPSILON;
+        let bounce_ray = Ray::new(bounce_origin, bounce_direction.normalize());
+
+        self.trace_ray(&bounce_ray, depth - 1)
+    }
+
+    fn background_color(&self, ray: &Ray) -> Vec3 {
+        let t = 0.5 * (ray.direction.normalize().y + 1.0);
+        Vec3::new(1.0, 1.0, 1.0) * (1.0 - t) + Vec3::new(0.5, 0.7, 1.0) * t
     }
 }
