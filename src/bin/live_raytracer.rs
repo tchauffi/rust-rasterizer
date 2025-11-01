@@ -4,11 +4,20 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 use bytemuck::Zeroable;
 use rust_raytracer::camera::Camera;
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
+
+// WASM support
 use rust_raytracer::gpu_scene::*;
 use rust_raytracer::material::Material;
 use rust_raytracer::mesh::Mesh;
 use rust_raytracer::sphere::Sphere;
 use rust_raytracer::vec3::Vec3;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
 use wgpu::util::DeviceExt;
 use winit::{event::*, event_loop::EventLoop, window::WindowBuilder};
 
@@ -110,7 +119,7 @@ struct State {
 
     // FPS tracking
     frame_count: u32,
-    fps_timer: std::time::Instant,
+    fps_timer: Instant,
     current_fps: f32,
 
     // UI
@@ -123,8 +132,9 @@ struct State {
 impl State {
     async fn new(window: Arc<winit::window::Window>) -> Result<Self> {
         let size = window.inner_size();
-        let width = size.width;
-        let height = size.height;
+        // Some web platforms report zero-sized canvases until the first layout pass; clamp to 1 so surface configuration succeeds.
+        let width = size.width.max(1);
+        let height = size.height.max(1);
 
         // Setup scene
         let camera = Camera::new(
@@ -137,12 +147,59 @@ impl State {
         );
 
         let bunny_material = Material::new(Vec3::new(1.0, 1.0, 1.0), 0.5);
-        let mut bunny = Mesh::from_obj_file("data/bunny.obj", bunny_material)
-            .map_err(|err| anyhow!("failed to load bunny OBJ: {err}"))?;
-        bunny.rotate_y(180.0);
-        bunny.transform(10.0, Vec3::new(0.0, -1.0, 4.0));
 
-        eprintln!("Bunny positioned at Z=4.0, centered around Y=-1.0");
+        #[cfg(not(target_arch = "wasm32"))]
+        let bunny = {
+            let mut mesh = Mesh::from_obj_file("data/bunny.obj", bunny_material)
+                .map_err(|err| anyhow!("failed to load bunny OBJ: {err}"))?;
+            mesh.rotate_y(180.0);
+            mesh.transform(10.0, Vec3::new(0.0, -1.0, 4.0));
+            eprintln!("Bunny positioned at Z=4.0, centered around Y=-1.0");
+            mesh
+        };
+
+        #[cfg(target_arch = "wasm32")]
+        let bunny = {
+            // For web, create a simple pyramid mesh since file I/O isn't available
+            use rust_raytracer::vec3::Vec3;
+
+            // Create pyramid vertices
+            let vertices = vec![
+                Vec3::new(0.0, 1.0, 0.0),    // 0: apex
+                Vec3::new(-0.5, -0.5, -0.5), // 1: base1
+                Vec3::new(0.5, -0.5, -0.5),  // 2: base2
+                Vec3::new(0.5, -0.5, 0.5),   // 3: base3
+                Vec3::new(-0.5, -0.5, 0.5),  // 4: base4
+            ];
+
+            // Create faces (triangles, 3 indices per face)
+            let faces = vec![
+                // Front face
+                0, 1, 2, // Right face
+                0, 2, 3, // Back face
+                0, 3, 4, // Left face
+                0, 4, 1, // Bottom (2 triangles)
+                1, 3, 2, 1, 4, 3,
+            ];
+
+            // Simple normals (one per vertex, pointing outward)
+            let normals = vec![
+                Vec3::new(0.0, 1.0, 0.0),    // apex
+                Vec3::new(-0.7, -0.3, -0.7), // base corners
+                Vec3::new(0.7, -0.3, -0.7),
+                Vec3::new(0.7, -0.3, 0.7),
+                Vec3::new(-0.7, -0.3, 0.7),
+            ];
+
+            let texture_coords = vec![(0.0, 0.0); 5]; // Simple UVs
+
+            let mut mesh = Mesh::new(vertices, faces, normals, texture_coords, bunny_material);
+            mesh.transform(10.0, Vec3::new(0.0, -1.0, 15.0));
+            log::info!(
+                "Created simple pyramid mesh for web (positioned at Z=4.0, centered around Y=-1.0)"
+            );
+            mesh
+        };
 
         let sphere2 = Sphere::new(
             Vec3::new(2.0, 0.0, 5.0),
@@ -209,19 +266,38 @@ impl State {
 
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
+                power_preference: if cfg!(target_arch = "wasm32") {
+                    wgpu::PowerPreference::LowPower
+                } else {
+                    wgpu::PowerPreference::HighPerformance
+                },
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
             })
             .await
             .context("failed to find GPU adapter")?;
 
+        #[cfg(target_arch = "wasm32")]
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("gpu-raytracer-device"),
                     required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
+                    // Use the adapter-provided limits to avoid exceeding WebGL capabilities
+                    required_limits: adapter.limits(),
+                },
+                None,
+            )
+            .await
+            .context("failed to create device")?;
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let (device, queue) = adapter
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    label: Some("gpu-raytracer-device"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: wgpu::Limits::downlevel_defaults(),
                 },
                 None,
             )
@@ -422,7 +498,6 @@ impl State {
             layout: Some(&compute_pipeline_layout),
             module: &shader,
             entry_point: "main",
-            compilation_options: Default::default(),
         });
 
         let compute_pipeline_normals =
@@ -431,7 +506,6 @@ impl State {
                 layout: Some(&compute_pipeline_layout),
                 module: &shader_normals,
                 entry_point: "main",
-                compilation_options: Default::default(),
             });
 
         // Create accumulation pipeline
@@ -518,7 +592,6 @@ impl State {
                 layout: Some(&accumulation_pipeline_layout),
                 module: &accumulation_shader,
                 entry_point: "main",
-                compilation_options: Default::default(),
             });
 
         // Create display pipeline
@@ -594,7 +667,6 @@ impl State {
                 module: &display_shader,
                 entry_point: "vs_main",
                 buffers: &[],
-                compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &display_shader,
@@ -604,7 +676,6 @@ impl State {
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
-                compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -719,7 +790,7 @@ impl State {
             accumulated_frames: 0,
             camera_moved: false,
             frame_count: 0,
-            fps_timer: std::time::Instant::now(),
+            fps_timer: Instant::now(),
             current_fps: 0.0,
             egui_renderer,
             egui_state,
@@ -1274,7 +1345,7 @@ impl State {
         if elapsed >= 1.0 {
             self.current_fps = self.frame_count as f32 / elapsed;
             self.frame_count = 0;
-            self.fps_timer = std::time::Instant::now();
+            self.fps_timer = Instant::now();
 
             let mode_name = if self.use_raytracing {
                 "Raytracing"
@@ -1462,8 +1533,58 @@ impl State {
     }
 }
 
+// Platform-specific entry points
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<()> {
-    let event_loop = EventLoop::new()?;
+    pollster::block_on(run())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    // On WASM, the real entry point is the start() function
+    // This main() is just to satisfy the binary target requirement
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(start)]
+pub fn start() {
+    // Set up panic hook for better error messages in browser console
+    console_error_panic_hook::set_once();
+
+    // Initialize console logging
+    console_log::init_with_level(log::Level::Info).expect("Could not initialize logger");
+
+    log::info!("WASM module loaded, starting application...");
+
+    // Spawn the async runtime
+    wasm_bindgen_futures::spawn_local(async {
+        log::info!("Async runtime started");
+        match run().await {
+            Ok(_) => log::info!("Application exited normally"),
+            Err(e) => {
+                log::error!("Application failed: {:?}", e);
+                // Also try to show in a more visible way
+                web_sys::window().and_then(|w| {
+                    w.alert_with_message(&format!("Failed to start: {:?}", e))
+                        .ok()
+                });
+            }
+        }
+    });
+}
+
+async fn run() -> Result<()> {
+    #[cfg(target_arch = "wasm32")]
+    log::info!("Creating event loop...");
+
+    let event_loop = EventLoop::new().context("Failed to create event loop")?;
+
+    #[cfg(target_arch = "wasm32")]
+    log::info!("Event loop created successfully");
+
+    #[cfg(target_arch = "wasm32")]
+    log::info!("Creating window...");
+
     let window = Arc::new(
         WindowBuilder::new()
             .with_title("GPU Raytracer - Drag mouse to rotate camera")
@@ -1472,16 +1593,102 @@ fn main() -> Result<()> {
             .build(&event_loop)?,
     );
 
+    // Attach canvas to DOM for web
+    #[cfg(target_arch = "wasm32")]
+    {
+        use winit::platform::web::WindowExtWebSys;
+
+        if let Some(win) = web_sys::window() {
+            if let Some(doc) = win.document() {
+                if let Some(body) = doc.body() {
+                    if let Some(canvas) = window.canvas() {
+                        let canvas_elem: web_sys::HtmlCanvasElement = canvas;
+
+                        // Style the canvas to fill the viewport
+                        canvas_elem
+                            .set_attribute("style", "width: 100%; height: 100%; display: block;")
+                            .ok();
+
+                        let device_pixel_ratio = win.device_pixel_ratio();
+                        let width = win
+                            .inner_width()
+                            .ok()
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(800.0);
+                        let height = win
+                            .inner_height()
+                            .ok()
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(600.0);
+
+                        // Set canvas pixel size to match the viewport
+                        canvas_elem.set_width((width * device_pixel_ratio).round() as u32);
+                        canvas_elem.set_height((height * device_pixel_ratio).round() as u32);
+
+                        let canvas_node: web_sys::Element = canvas_elem.clone().into();
+                        body.append_child(&canvas_node).ok();
+
+                        // Update winit's logical size so the camera aspect matches the viewport
+                        let _ =
+                            window.request_inner_size(winit::dpi::LogicalSize::new(width, height));
+                    }
+                }
+            }
+        }
+
+        log::info!("Canvas attached to document body and resized to viewport");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     eprintln!("Window created, initializing GPU...");
-    let mut state = pollster::block_on(State::new(window.clone()))?;
-    eprintln!("GPU initialized, starting event loop...");
-    eprintln!("Controls:");
-    eprintln!("  - Click and drag to rotate camera");
-    eprintln!("  - Press SPACE to toggle between raytracing and normals view");
+
+    #[cfg(target_arch = "wasm32")]
+    log::info!("Window created, initializing GPU...");
+
+    #[cfg(target_arch = "wasm32")]
+    log::info!("Calling State::new()...");
+
+    let mut state = State::new(window.clone())
+        .await
+        .context("Failed to create State")?;
+
+    #[cfg(target_arch = "wasm32")]
+    log::info!("State created successfully");
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        eprintln!("GPU initialized, starting event loop...");
+        eprintln!("Controls:");
+        eprintln!("  - Click and drag to rotate camera");
+        eprintln!("  - Press SPACE to toggle between raytracing and normals view");
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        log::info!("GPU initialized, starting event loop...");
+        log::info!("Controls:");
+        log::info!("  - Click and drag to rotate camera");
+        log::info!("  - Press SPACE to toggle between raytracing and normals view");
+    }
+
     state.window.focus_window();
     state.window.request_redraw();
 
-    let mut last_update = std::time::Instant::now();
+    #[cfg(target_arch = "wasm32")]
+    {
+        use winit::platform::web::WindowExtWebSys;
+        if let Some(canvas) = state.window.canvas() {
+            let width = canvas.width().max(1);
+            let height = canvas.height().max(1);
+            state.resize(winit::dpi::PhysicalSize::new(width, height));
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    let mut last_update = Instant::now();
+
+    #[cfg(target_arch = "wasm32")]
+    let mut last_update = web_time::Instant::now();
 
     event_loop.run(move |event, target| {
         match event {
@@ -1520,18 +1727,22 @@ fn main() -> Result<()> {
                                         } else {
                                             "Normals"
                                         };
+                                        #[cfg(not(target_arch = "wasm32"))]
                                         eprintln!("Switched to {} mode", mode);
+                                        #[cfg(target_arch = "wasm32")]
+                                        log::info!("Switched to {} mode", mode);
                                     }
                                     winit::keyboard::KeyCode::Tab => {
                                         state.ui_state.show_ui = !state.ui_state.show_ui;
-                                        eprintln!(
-                                            "UI: {}",
-                                            if state.ui_state.show_ui {
-                                                "shown"
-                                            } else {
-                                                "hidden"
-                                            }
-                                        );
+                                        let ui_status = if state.ui_state.show_ui {
+                                            "shown"
+                                        } else {
+                                            "hidden"
+                                        };
+                                        #[cfg(not(target_arch = "wasm32"))]
+                                        eprintln!("UI: {}", ui_status);
+                                        #[cfg(target_arch = "wasm32")]
+                                        log::info!("UI: {}", ui_status);
                                     }
                                     _ => {}
                                 }
@@ -1545,6 +1756,7 @@ fn main() -> Result<()> {
                     } => {
                         if *button == winit::event::MouseButton::Left {
                             state.mouse_pressed = *button_state == ElementState::Pressed;
+                            #[cfg(not(target_arch = "wasm32"))]
                             eprintln!(
                                 "Mouse button: {}",
                                 if state.mouse_pressed {
@@ -1566,8 +1778,6 @@ fn main() -> Result<()> {
                                 let delta_x = current_pos.0 - last_pos.0;
                                 let delta_y = current_pos.1 - last_pos.1;
                                 state.handle_mouse_motion(delta_x, delta_y);
-                            } else {
-                                eprintln!("Mouse pressed but no last position");
                             }
                         }
 
@@ -1575,7 +1785,11 @@ fn main() -> Result<()> {
                     }
                     WindowEvent::RedrawRequested => {
                         // Update camera based on elapsed time
-                        let now = std::time::Instant::now();
+                        #[cfg(not(target_arch = "wasm32"))]
+                        let now = Instant::now();
+                        #[cfg(target_arch = "wasm32")]
+                        let now = web_time::Instant::now();
+
                         let delta_time = (now - last_update).as_secs_f64();
                         last_update = now;
 
@@ -1584,15 +1798,24 @@ fn main() -> Result<()> {
                         match state.render() {
                             Ok(_) => {}
                             Err(wgpu::SurfaceError::Lost) => {
+                                #[cfg(not(target_arch = "wasm32"))]
                                 eprintln!("Surface lost, resizing...");
+                                #[cfg(target_arch = "wasm32")]
+                                log::warn!("Surface lost, resizing...");
                                 state.resize(state.size);
                             }
                             Err(wgpu::SurfaceError::OutOfMemory) => {
+                                #[cfg(not(target_arch = "wasm32"))]
                                 eprintln!("Out of memory!");
+                                #[cfg(target_arch = "wasm32")]
+                                log::error!("Out of memory!");
                                 target.exit();
                             }
                             Err(e) => {
+                                #[cfg(not(target_arch = "wasm32"))]
                                 eprintln!("Render error: {:?}", e);
+                                #[cfg(target_arch = "wasm32")]
+                                log::error!("Render error: {:?}", e);
                             }
                         }
                     }

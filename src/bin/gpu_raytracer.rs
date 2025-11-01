@@ -226,7 +226,6 @@ async fn run() -> Result<()> {
         layout: Some(&pipeline_layout),
         module: &shader,
         entry_point: "main",
-        compilation_options: Default::default(),
     });
 
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
