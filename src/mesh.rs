@@ -1,8 +1,7 @@
 use crate::aabb::AABB;
-use crate::hit::HitRecord;
-use crate::hittable::Hittable;
+use crate::hittable::{HitRecord, Hittable};
+use crate::material::Material;
 use crate::ray::Ray;
-use crate::sphere::Material;
 use crate::vec3::Vec3;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -279,7 +278,7 @@ mod tests {
         let mut temp_file = NamedTempFile::new().unwrap();
         write!(temp_file, "{}", obj_data).unwrap();
 
-        let material = Material::new(Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 0.0), 0.0);
+        let material = Material::new(Vec3::new(1.0, 0.0, 0.0), 0.5);
         let mesh = Mesh::from_obj_file(temp_file.path().to_str().unwrap(), material).unwrap();
         assert_eq!(mesh.vertices.len(), 3);
         assert_eq!(mesh.faces.len(), 3);
