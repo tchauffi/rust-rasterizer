@@ -39,7 +39,7 @@ pub struct SceneUniform {
     pub light_color: [f32; 4],
     pub ambient_color: [f32; 4],
     pub mesh_color: [f32; 4],
-    pub render_config: [u32; 4], // samples_per_pixel, max_bounces, padded_width_in_pixels, unused
+    pub render_config: [u32; 4], // samples_per_pixel, max_bounces, padded_width_in_pixels, frame_seed
 }
 
 pub fn vec3_to_array(vec: Vec3, w: f32) -> [f32; 4] {

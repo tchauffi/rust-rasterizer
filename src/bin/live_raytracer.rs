@@ -68,6 +68,11 @@ struct State {
     compute_pipeline: wgpu::ComputePipeline,
     compute_pipeline_normals: wgpu::ComputePipeline,
 
+    // Accumulation resources
+    accumulation_pipeline: wgpu::ComputePipeline,
+    accumulation_bind_group: wgpu::BindGroup,
+    accumulation_uniform_buffer: wgpu::Buffer,
+
     // Display resources
     display_pipeline: wgpu::RenderPipeline,
     display_bind_group: wgpu::BindGroup,
@@ -96,6 +101,12 @@ struct State {
 
     // Render mode
     use_raytracing: bool, // true = raytracing, false = normals view
+
+    // Temporal accumulation
+    accumulation_buffer: wgpu::Buffer,
+    accumulation_texture: wgpu::Texture,
+    accumulated_frames: u32,
+    camera_moved: bool,
 
     // FPS tracking
     frame_count: u32,
@@ -270,6 +281,16 @@ impl State {
             mapped_at_creation: false,
         });
 
+        // Create accumulation buffer for temporal accumulation
+        let accumulation_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("accumulation-buffer"),
+            size: output_buffer_size,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         // Create texture for display
         let output_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("output-texture"),
@@ -283,6 +304,24 @@ impl State {
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba32Float,
             usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+
+        // Create accumulation texture for temporal accumulation
+        let accumulation_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("accumulation-texture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
 
@@ -391,6 +430,93 @@ impl State {
                 label: Some("raytracer-normals-pipeline"),
                 layout: Some(&compute_pipeline_layout),
                 module: &shader_normals,
+                entry_point: "main",
+                compilation_options: Default::default(),
+            });
+
+        // Create accumulation pipeline
+        let accumulation_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("accumulation-shader"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!(
+                "../shaders/accumulate.wgsl"
+            ))),
+        });
+
+        let accumulation_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("accumulation-bind-layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        let accumulation_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("accumulation-uniform"),
+            size: 16, // vec4<u32>: width, height, accumulated_frames, padded_width
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let accumulation_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("accumulation-bind-group"),
+            layout: &accumulation_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: output_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: accumulation_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: accumulation_uniform_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let accumulation_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("accumulation-pipeline-layout"),
+                bind_group_layouts: &[&accumulation_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        let accumulation_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("accumulation-pipeline"),
+                layout: Some(&accumulation_pipeline_layout),
+                module: &accumulation_shader,
                 entry_point: "main",
                 compilation_options: Default::default(),
             });
@@ -572,6 +698,9 @@ impl State {
             bunny_mesh: bunny,
             compute_pipeline,
             compute_pipeline_normals,
+            accumulation_pipeline,
+            accumulation_bind_group,
+            accumulation_uniform_buffer,
             display_pipeline,
             display_bind_group,
             display_bind_group_layout,
@@ -585,6 +714,10 @@ impl State {
             last_mouse_pos: None,
             mouse_pressed: false,
             use_raytracing: true, // Start with raytracing mode
+            accumulation_buffer,
+            accumulation_texture,
+            accumulated_frames: 0,
+            camera_moved: false,
             frame_count: 0,
             fps_timer: std::time::Instant::now(),
             current_fps: 0.0,
@@ -627,6 +760,15 @@ impl State {
                 mapped_at_creation: false,
             });
 
+            self.accumulation_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("accumulation-buffer"),
+                size: buffer_size,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+
             self.output_texture = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("output-texture"),
                 size: wgpu::Extent3d {
@@ -641,6 +783,26 @@ impl State {
                 usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             });
+
+            self.accumulation_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("accumulation-texture"),
+                size: wgpu::Extent3d {
+                    width: new_size.width,
+                    height: new_size.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba32Float,
+                usage: wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+
+            // Reset accumulation on resize
+            self.accumulated_frames = 0;
 
             // Recreate bind groups with new buffers/textures
             let output_view = self
@@ -684,6 +846,27 @@ impl State {
                     },
                 ],
             });
+
+            // Recreate accumulation bind group with new buffers
+            self.accumulation_bind_group =
+                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("accumulation-bind-group"),
+                    layout: &self.accumulation_pipeline.get_bind_group_layout(0),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: self.output_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: self.accumulation_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: self.accumulation_uniform_buffer.as_entire_binding(),
+                        },
+                    ],
+                });
 
             // Update camera aspect ratio with new dimensions
             self.camera.width = new_size.width as f64;
@@ -751,6 +934,9 @@ impl State {
         // Clamp pitch to avoid gimbal lock
         self.camera_pitch = self.camera_pitch.clamp(-89.0, 89.0);
 
+        // Mark camera as moved to reset accumulation
+        self.camera_moved = true;
+
         eprintln!(
             "Mouse delta: ({:.2}, {:.2}) -> Yaw: {:.1}°, Pitch: {:.1}°",
             delta_x, delta_y, self.camera_yaw, self.camera_pitch
@@ -788,6 +974,7 @@ impl State {
         ];
         self.scene_uniform.render_config[0] = self.ui_state.samples_per_pixel;
         self.scene_uniform.render_config[1] = self.ui_state.max_bounces;
+        self.scene_uniform.render_config[3] = self.accumulated_frames; // Frame seed for temporal variation
 
         // Rebuild sphere buffer
         let spheres: Vec<GpuSphere> = self
@@ -853,6 +1040,10 @@ impl State {
             0,
             bytemuck::bytes_of(&self.scene_uniform),
         );
+
+        // Reset accumulation when scene changes
+        self.accumulated_frames = 0;
+        self.camera_moved = true;
     }
 
     fn build_ui(&mut self) -> egui::FullOutput {
@@ -1059,6 +1250,7 @@ impl State {
                             "Normals"
                         }
                     ));
+                    ui.label(format!("Accumulated Frames: {}", self.accumulated_frames));
                     ui.label("Press TAB to toggle UI");
                     ui.label("Press SPACE to toggle render mode");
                 });
@@ -1106,6 +1298,14 @@ impl State {
                 label: Some("render-encoder"),
             });
 
+        // Update frame seed for temporal variation in random sampling
+        self.scene_uniform.render_config[3] = self.accumulated_frames;
+        self.queue.write_buffer(
+            &self.uniform_buffer,
+            0,
+            bytemuck::bytes_of(&self.scene_uniform),
+        );
+
         // Run compute shader (choose pipeline based on mode)
         {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -1128,16 +1328,59 @@ impl State {
             cpass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
         }
 
-        // Copy buffer to texture
-        // Note: bytes_per_row must be a multiple of 256 (COPY_BYTES_PER_ROW_ALIGNMENT)
+        // Temporal accumulation logic
         let bytes_per_pixel = 16u32; // 4 f32s per pixel
         let unpadded_bytes_per_row = self.size.width * bytes_per_pixel;
         let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
         let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
+        let buffer_size = (padded_bytes_per_row * self.size.height) as u64;
 
+        if self.camera_moved {
+            // Clear accumulation buffer when camera moves
+            self.queue.write_buffer(
+                &self.accumulation_buffer,
+                0,
+                &vec![0u8; buffer_size as usize],
+            );
+            self.accumulated_frames = 0;
+            self.camera_moved = false;
+        }
+
+        // Run accumulation compute shader to blend current frame with history
+        let padded_width_pixels = padded_bytes_per_row / bytes_per_pixel;
+        let accumulation_uniform_data: [u32; 4] = [
+            self.size.width,
+            self.size.height,
+            self.accumulated_frames,
+            padded_width_pixels,
+        ];
+        self.queue.write_buffer(
+            &self.accumulation_uniform_buffer,
+            0,
+            bytemuck::cast_slice(&accumulation_uniform_data),
+        );
+
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("accumulation-pass"),
+                timestamp_writes: None,
+            });
+
+            cpass.set_pipeline(&self.accumulation_pipeline);
+            cpass.set_bind_group(0, &self.accumulation_bind_group, &[]);
+            let workgroup_size = [8u32, 8u32];
+            let dispatch_x = (self.size.width + workgroup_size[0] - 1).div_ceil(workgroup_size[0]);
+            let dispatch_y = (self.size.height + workgroup_size[1] - 1).div_ceil(workgroup_size[1]);
+            cpass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
+        }
+
+        self.accumulated_frames += 1;
+
+        // Copy accumulated buffer to texture for display
+        // Note: bytes_per_row must be a multiple of 256 (COPY_BYTES_PER_ROW_ALIGNMENT)
         encoder.copy_buffer_to_texture(
             wgpu::ImageCopyBuffer {
-                buffer: &self.output_buffer,
+                buffer: &self.accumulation_buffer,
                 layout: wgpu::ImageDataLayout {
                     offset: 0,
                     bytes_per_row: Some(padded_bytes_per_row),
