@@ -113,6 +113,9 @@
     <!-- Trunk will automatically inject the WASM here -->
     <link data-trunk rel="rust" data-bin="live_raytracer" data-wasm-opt="z"/>
 
+    <!-- Copy data assets for WASM -->
+    <link data-trunk rel="copy-dir" href="data"/>
+
     <script>
         // Hide loading spinner after a delay or when WASM is ready
         window.addEventListener('load', () => {

@@ -137,6 +137,14 @@ impl Scene {
     }
 
     fn background_color(&self, ray: &Ray) -> Vec3 {
+        // Check if there's an environment light in the scene
+        for light in &self.lights {
+            if let crate::lights::Light::Environment(env_light) = light {
+                return env_light.compute(&ray.direction);
+            }
+        }
+
+        // Default sky gradient if no environment light
         let t = 0.5 * (ray.direction.normalize().y + 1.0);
         Vec3::new(1.0, 1.0, 1.0) * (1.0 - t) + Vec3::new(0.5, 0.7, 1.0) * t
     }

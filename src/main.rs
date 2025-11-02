@@ -7,6 +7,7 @@ mod mesh;
 mod ray;
 mod scene;
 mod sphere;
+mod texture;
 mod vec3;
 use camera::Camera;
 use hittable::{HitRecord, Hittable};

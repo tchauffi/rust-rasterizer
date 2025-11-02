@@ -1,6 +1,7 @@
 use crate::hittable::HitRecord;
 use crate::hittable::Hittable;
 use crate::ray::Ray;
+use crate::texture::Texture;
 use crate::vec3::Vec3;
 
 const EPSILON: f64 = 1e-3;
@@ -107,12 +108,84 @@ impl AmbientLight {
     }
 }
 
+#[derive(Clone)]
+pub struct TextureLight {
+    pub texture: Texture,
+    pub intensity: f64,
+}
+
+impl TextureLight {
+    pub fn new(texture: Texture, intensity: f64) -> Self {
+        TextureLight { texture, intensity }
+    }
+
+    pub fn compute(&self, hit: &HitRecord, _objects: &[Box<dyn Hittable>]) -> Vec3 {
+        // Convert hit point to UV coordinates
+        // This is a simple spherical mapping - can be extended for other mappings
+        let (u, v) = self.world_to_uv(&hit.hit_point, &hit.normal);
+
+        // Sample the texture with bilinear interpolation for smooth results
+        let texture_color = self.texture.get_color_with_interpolation(
+            u,
+            v,
+            crate::texture::InterpolationMethod::Bilinear,
+        );
+
+        texture_color * self.intensity
+    }
+
+    /// Converts world space coordinates to UV coordinates
+    /// Uses spherical mapping based on the normal direction
+    fn world_to_uv(&self, _point: &Vec3, normal: &Vec3) -> (f64, f64) {
+        let u = 0.5 + normal.z.atan2(normal.x) / (2.0 * std::f64::consts::PI);
+        let v = 0.5 - normal.y.asin() / std::f64::consts::PI;
+        (u, v)
+    }
+}
+
+#[derive(Clone)]
+pub struct EnvironmentLight {
+    pub texture: Texture,
+    pub intensity: f64,
+}
+
+impl EnvironmentLight {
+    pub fn new(texture: Texture, intensity: f64) -> Self {
+        EnvironmentLight { texture, intensity }
+    }
+
+    pub fn compute(&self, ray_direction: &Vec3) -> Vec3 {
+        // Convert ray direction to spherical UV coordinates
+        let (u, v) = self.direction_to_uv(ray_direction);
+
+        // Sample the environment map with bilinear interpolation
+        let env_color = self.texture.get_color_with_interpolation(
+            u,
+            v,
+            crate::texture::InterpolationMethod::Bilinear,
+        );
+
+        env_color * self.intensity
+    }
+
+    /// Converts a ray direction to UV coordinates for environment mapping
+    /// Uses equirectangular/spherical mapping
+    fn direction_to_uv(&self, direction: &Vec3) -> (f64, f64) {
+        let dir = direction.normalize();
+        let u = 0.5 + dir.z.atan2(dir.x) / (2.0 * std::f64::consts::PI);
+        let v = 0.5 - dir.y.asin() / std::f64::consts::PI;
+        (u, v)
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Clone)]
 pub enum Light {
     Point(PointLight),
     Directional(DirectionalLight),
     Ambient(AmbientLight),
+    Texture(TextureLight),
+    Environment(EnvironmentLight),
 }
 
 #[allow(dead_code)]
@@ -128,11 +201,22 @@ impl Light {
     pub fn new_ambient_light(color: Vec3, intensity: f64) -> Self {
         Light::Ambient(AmbientLight::new(color, intensity))
     }
+
+    pub fn new_texture_light(texture: Texture, intensity: f64) -> Self {
+        Light::Texture(TextureLight::new(texture, intensity))
+    }
+
+    pub fn new_environment_light(texture: Texture, intensity: f64) -> Self {
+        Light::Environment(EnvironmentLight::new(texture, intensity))
+    }
+
     pub fn compute_contribution(&self, hit: &HitRecord, objects: &[Box<dyn Hittable>]) -> Vec3 {
         match self {
             Light::Ambient(ambient) => ambient.compute(hit, objects),
             Light::Point(point) => point.compute(hit, objects),
             Light::Directional(dir) => dir.compute(hit, objects),
+            Light::Texture(texture) => texture.compute(hit, objects),
+            Light::Environment(_) => Vec3::new(0.0, 0.0, 0.0), // Environment light is sampled during ray misses
         }
     }
 }
@@ -194,5 +278,31 @@ mod tests {
 
         let ambient = Light::new_ambient_light(Vec3::new(0.5, 0.5, 0.5), 0.2);
         assert!(matches!(ambient, Light::Ambient(_)));
+    }
+
+    #[test]
+    fn test_environment_light_creation() {
+        let texture = Texture::default();
+        let light = EnvironmentLight::new(texture, 1.0);
+        assert_eq!(light.intensity, 1.0);
+    }
+
+    #[test]
+    fn test_environment_light_direction_to_uv() {
+        let texture = Texture::default();
+        let light = EnvironmentLight::new(texture, 1.0);
+
+        // Test forward direction (0, 0, 1)
+        let dir = Vec3::new(0.0, 0.0, 1.0);
+        let (u, v) = light.direction_to_uv(&dir);
+        assert!((u - 0.5).abs() < 0.01);
+        assert!((v - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_environment_light_enum() {
+        let texture = Texture::default();
+        let env_light = Light::new_environment_light(texture, 1.5);
+        assert!(matches!(env_light, Light::Environment(_)));
     }
 }

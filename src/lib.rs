@@ -8,6 +8,7 @@ pub mod material;
 pub mod mesh;
 pub mod ray;
 pub mod sphere;
+pub mod texture;
 pub mod vec3;
 
 // GPU-specific utilities
