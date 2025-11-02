@@ -162,11 +162,44 @@ impl State {
         #[cfg(target_arch = "wasm32")]
         let bunny = {
             let bunny_obj = include_str!("../../data/bunny.obj");
-            let mut mesh = Mesh::from_obj_str(bunny_obj, bunny_material)
-                .map_err(|err| anyhow!("failed to parse embedded bunny OBJ: {err}"))?;
+            log::info!(
+                "🔍 WASM BUILD: Embedded OBJ data length: {} bytes",
+                bunny_obj.len()
+            );
+
+            if bunny_obj.is_empty() {
+                log::error!("❌ CRITICAL: Embedded OBJ data is EMPTY!");
+                return Err(anyhow!("Embedded bunny.obj is empty"));
+            }
+
+            let mut mesh = Mesh::from_obj_str(bunny_obj, bunny_material).map_err(|err| {
+                log::error!("❌ Failed to parse OBJ: {}", err);
+                anyhow!("failed to parse embedded bunny OBJ: {err}")
+            })?;
+
+            log::info!(
+                "✅ Parsed mesh: {} vertices, {} faces",
+                mesh.vertices.len(),
+                mesh.faces.len() / 3
+            );
+
+            if mesh.vertices.is_empty() {
+                log::error!("❌ CRITICAL: Mesh has NO VERTICES after parsing!");
+                return Err(anyhow!("Mesh has no vertices"));
+            }
+
             mesh.rotate_y(180.0);
             mesh.transform(10.0, Vec3::new(0.0, -1.0, 4.0));
-            log::info!("Loaded embedded bunny mesh for web viewer");
+            log::info!("✅ Transformed bunny mesh for web viewer");
+            log::info!(
+                "📍 Bunny bounds: min=({:.2}, {:.2}, {:.2}), max=({:.2}, {:.2}, {:.2})",
+                mesh.bounding_box.min.x,
+                mesh.bounding_box.min.y,
+                mesh.bounding_box.min.z,
+                mesh.bounding_box.max.x,
+                mesh.bounding_box.max.y,
+                mesh.bounding_box.max.z
+            );
             mesh
         };
 
@@ -185,20 +218,32 @@ impl State {
 
         let (triangles, mut bvh_nodes) = mesh_to_gpu_data(&bunny);
         let triangle_count = triangles.len() as u32;
+        log::info!(
+            "GPU data: {} triangles, {} BVH nodes",
+            triangle_count,
+            bvh_nodes.len()
+        );
         if bvh_nodes.is_empty() {
             bvh_nodes.push(GpuBvhNode::zeroed());
         }
         let bvh_node_count = if triangle_count == 0 {
+            log::warn!("No triangles in mesh!");
             0
         } else {
             bvh_nodes.len() as u32
         };
         let triangles_storage: Cow<[GpuTriangle]> = if triangles.is_empty() {
+            log::warn!("Using zeroed triangle storage");
             Cow::Owned(vec![GpuTriangle::zeroed()])
         } else {
             Cow::Owned(triangles)
         };
         let bvh_storage: Cow<[GpuBvhNode]> = Cow::Owned(bvh_nodes);
+        log::info!(
+            "Scene uniform will have: triangle_count={}, bvh_node_count={}",
+            triangle_count,
+            bvh_node_count
+        );
 
         let gpu_spheres: Vec<GpuSphere> = spheres.iter().map(sphere_to_gpu).collect();
         let sphere_count = gpu_spheres.len() as u32;
