@@ -17,6 +17,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          lfs: true
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -30,6 +32,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          lfs: true
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
