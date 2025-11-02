@@ -7,6 +7,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Cursor};
 
 #[allow(dead_code)]
+#[derive(Clone)]
 pub struct Mesh {
     pub vertices: Vec<Vec3>,
     pub faces: Vec<usize>,

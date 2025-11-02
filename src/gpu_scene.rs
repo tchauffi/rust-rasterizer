@@ -24,8 +24,9 @@ pub struct GpuTriangle {
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct GpuSphere {
-    pub center_radius: [f32; 4],
-    pub color: [f32; 4],
+    pub center_radius: [f32; 4], // xyz: center, w: radius
+    pub color: [f32; 4],         // xyz: color, w: unused
+    pub material: [f32; 4],      // x: roughness, y: metallic, z: material_type, w: unused
 }
 
 #[repr(C)]
@@ -267,6 +268,14 @@ pub fn mesh_to_gpu_data(mesh: &Mesh) -> (Vec<GpuTriangle>, Vec<GpuBvhNode>) {
 }
 
 pub fn sphere_to_gpu(sphere: &Sphere) -> GpuSphere {
+    use crate::material::MaterialType;
+
+    let material_type = match sphere.material.material_type {
+        MaterialType::Diffuse => 0.0,
+        MaterialType::Metallic => 1.0,
+        MaterialType::Dielectric => 2.0,
+    };
+
     GpuSphere {
         center_radius: [
             sphere.center.x as f32,
@@ -279,6 +288,12 @@ pub fn sphere_to_gpu(sphere: &Sphere) -> GpuSphere {
             sphere.material.color.y as f32,
             sphere.material.color.z as f32,
             1.0,
+        ],
+        material: [
+            sphere.material.roughness as f32,
+            sphere.material.metallic as f32,
+            material_type,
+            0.0,
         ],
     }
 }

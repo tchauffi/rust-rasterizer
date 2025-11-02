@@ -34,6 +34,12 @@ async fn run() -> Result<()> {
     bunny.rotate_y(180.0);
     bunny.transform(10.0, Vec3::new(0.0, -1.0, 4.0));
 
+    let sphere1 = Sphere::new(
+        Vec3::new(0.0, -1001.0, 5.0),
+        1000.0,
+        Material::new_metallic(Vec3::new(1.0, 1.0, 1.0), 0.07),
+    );
+
     let sphere2 = Sphere::new(
         Vec3::new(2.0, 0.0, 5.0),
         1.0,
@@ -44,7 +50,7 @@ async fn run() -> Result<()> {
         1.0,
         Material::new(Vec3::new(0.0, 0.0, 1.0), 0.5),
     );
-    let spheres = [sphere2, sphere3];
+    let spheres = [sphere1, sphere2, sphere3];
 
     let (triangles, mut bvh_nodes) = mesh_to_gpu_data(&bunny);
     let triangle_count = triangles.len() as u32;
@@ -77,7 +83,7 @@ async fn run() -> Result<()> {
     let directional_strength = 0.8_f64;
     let directional_color = Vec3::new(1.0, 1.0, 1.0);
     let ambient_color = Vec3::new(0.1, 0.1, 0.1) * 0.2;
-    let samples_per_pixel = 10u32; // Increased from 10 to 100
+    let samples_per_pixel = 256u32; // Increased from 10 to 100
     let max_bounces = 3u32;
 
     // Storage buffer is laid out in tightly packed rows, so padded width just equals image width.

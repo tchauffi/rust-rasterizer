@@ -23,7 +23,8 @@ struct Triangle {
 
 struct Sphere {
     center_radius: vec4<f32>, // xyz: center, w: radius
-    color: vec4<f32>,
+    color: vec4<f32>,          // xyz: color, w: unused
+    material: vec4<f32>,       // x: roughness, y: metallic, z: material_type, w: unused
 };
 
 struct BvhNode {
@@ -40,6 +41,9 @@ struct HitInfo {
     normal: vec3<f32>,
     color: vec3<f32>,
     hit: bool,
+    roughness: f32,
+    metallic: f32,
+    material_type: f32,
 };
 
 const PI: f32 = 3.141592653589793;
@@ -95,6 +99,36 @@ fn random_in_hemisphere(normal: vec3<f32>, seed: vec3<u32>) -> vec3<f32> {
     return dir;
 }
 
+fn reflect(incident: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    return incident - 2.0 * dot(incident, normal) * normal;
+}
+
+// Sample a direction based on material type
+fn sample_material_direction(
+    incident_dir: vec3<f32>,
+    normal: vec3<f32>,
+    roughness: f32,
+    metallic: f32,
+    seed: vec3<u32>
+) -> vec3<f32> {
+    // Perfect reflection for metallic
+    let reflected = reflect(incident_dir, normal);
+
+    // Diffuse scatter
+    let diffuse = random_in_hemisphere(normal, seed);
+
+    // Blend between diffuse and reflection based on metallic value
+    let dir = mix(diffuse, reflected, metallic);
+
+    // Add roughness by perturbing the direction slightly
+    if (roughness > 0.01) {
+        let perturb = random_unit_vector(seed + vec3<u32>(7u, 11u, 13u)) * roughness;
+        return normalize(dir + perturb);
+    }
+
+    return normalize(dir);
+}
+
 fn sky_color(ray_dir: vec3<f32>) -> vec3<f32> {
     let t = 0.5 * (ray_dir.y + 1.0);
     let white = vec3<f32>(1.0, 1.0, 1.0);
@@ -103,7 +137,7 @@ fn sky_color(ray_dir: vec3<f32>) -> vec3<f32> {
 }
 
 fn intersect_triangle(origin: vec3<f32>, dir: vec3<f32>, tri: Triangle) -> HitInfo {
-    var info = HitInfo(LARGE_DISTANCE, vec3<f32>(0.0), vec3<f32>(0.0), false);
+    var info = HitInfo(LARGE_DISTANCE, vec3<f32>(0.0), vec3<f32>(0.0), false, 0.5, 0.0, 0.0);
 
     let v0 = tri.v0.xyz;
     let v1 = tri.v1.xyz;
@@ -142,13 +176,16 @@ fn intersect_triangle(origin: vec3<f32>, dir: vec3<f32>, tri: Triangle) -> HitIn
         info.normal = normalize(interpolated);
         info.color = scene.mesh_color.xyz;
         info.hit = true;
+        info.roughness = 0.5;
+        info.metallic = 0.0;
+        info.material_type = 0.0; // Diffuse
     }
 
     return info;
 }
 
 fn intersect_sphere(origin: vec3<f32>, dir: vec3<f32>, sph: Sphere) -> HitInfo {
-    var info = HitInfo(LARGE_DISTANCE, vec3<f32>(0.0), vec3<f32>(0.0), false);
+    var info = HitInfo(LARGE_DISTANCE, vec3<f32>(0.0), vec3<f32>(0.0), false, 0.5, 0.0, 0.0);
 
     let center = sph.center_radius.xyz;
     let radius = sph.center_radius.w;
@@ -175,6 +212,9 @@ fn intersect_sphere(origin: vec3<f32>, dir: vec3<f32>, sph: Sphere) -> HitInfo {
         info.normal = normalize(hit_pos - center);
         info.color = sph.color.xyz;
         info.hit = true;
+        info.roughness = sph.material.x;
+        info.metallic = sph.material.y;
+        info.material_type = sph.material.z;
     }
 
     return info;
@@ -209,7 +249,7 @@ fn aabb_entry_distance(origin: vec3<f32>, inv_dir: vec3<f32>, bounds_min: vec3<f
 }
 
 fn traverse_triangles(origin: vec3<f32>, dir: vec3<f32>) -> HitInfo {
-    var closest_hit = HitInfo(LARGE_DISTANCE, vec3<f32>(0.0), vec3<f32>(0.0), false);
+    var closest_hit = HitInfo(LARGE_DISTANCE, vec3<f32>(0.0), vec3<f32>(0.0), false, 0.5, 0.0, 0.0);
     let triangle_count = scene.resolution.z;
     if (triangle_count == 0u) {
         return closest_hit;
@@ -302,7 +342,7 @@ fn traverse_triangles(origin: vec3<f32>, dir: vec3<f32>) -> HitInfo {
 }
 
 fn trace_ray(origin: vec3<f32>, dir: vec3<f32>) -> HitInfo {
-    var closest_hit = HitInfo(LARGE_DISTANCE, vec3<f32>(0.0), vec3<f32>(0.0), false);
+    var closest_hit = HitInfo(LARGE_DISTANCE, vec3<f32>(0.0), vec3<f32>(0.0), false, 0.5, 0.0, 0.0);
 
     let triangle_hit = traverse_triangles(origin, dir);
     if (triangle_hit.hit) {
@@ -319,19 +359,55 @@ fn trace_ray(origin: vec3<f32>, dir: vec3<f32>) -> HitInfo {
     return closest_hit;
 }
 
-fn evaluate_direct(hit_pos: vec3<f32>, normal: vec3<f32>, albedo: vec3<f32>) -> vec3<f32> {
+fn evaluate_direct(
+    hit_pos: vec3<f32>,
+    normal: vec3<f32>,
+    albedo: vec3<f32>,
+    view_dir: vec3<f32>,
+    roughness: f32,
+    metallic: f32
+) -> vec3<f32> {
     let light_dir = normalize(-scene.light_direction.xyz);
     let light_strength = scene.light_direction.w;
     var diffuse = max(dot(normal, light_dir), 0.0) * light_strength;
 
-    if (diffuse > 0.0 && is_shadowed(hit_pos, normal, light_dir)) {
+    let in_shadow = diffuse > 0.0 && is_shadowed(hit_pos, normal, light_dir);
+
+    if (in_shadow) {
         diffuse = 0.0;
     }
 
     let ambient = scene.ambient_color.xyz;
     let light_color = scene.light_color.xyz;
-    let lighting = ambient + light_color * diffuse;
-    return albedo * lighting;
+
+    // Diffuse contribution (almost zero for metallic surfaces)
+    let diffuse_contribution = mix(1.0, 0.05, metallic);
+    let diffuse_lighting = ambient + light_color * diffuse * diffuse_contribution;
+    var result = albedo * diffuse_lighting;
+
+    // Add specular highlights (works for both plastic and metal)
+    if (!in_shadow && diffuse > 0.0) {
+        let reflect_dir = reflect(-light_dir, normal);
+        let spec_angle = max(dot(view_dir, reflect_dir), 0.0);
+
+        // Convert roughness to shininess (inverse relationship)
+        // Roughness 0.0 = very shiny (high shininess ~256)
+        // Roughness 1.0 = very rough (low shininess ~4)
+        let shininess = mix(512.0, 8.0, roughness);
+        let spec_strength = pow(spec_angle, shininess);
+
+        // Metallic surfaces have colored specular, plastic/dielectric have white specular
+        let specular_color = mix(vec3<f32>(1.0), albedo, metallic);
+
+        // Specular intensity: much brighter for metallic surfaces
+        let base_intensity = mix(0.5, 3.0, metallic);
+        let specular_intensity = base_intensity * (1.0 - roughness * 0.5);
+        let specular = specular_color * spec_strength * light_strength * specular_intensity;
+
+        result = result + light_color * specular;
+    }
+
+    return result;
 }
 
 @compute @workgroup_size(8, 8)
@@ -374,10 +450,20 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             }
 
             let hit_pos = ray_origin + ray_dir * hit.dist;
-            let direct = evaluate_direct(hit_pos, hit.normal, hit.color);
-            radiance = radiance + throughput * direct;
 
-            throughput = throughput * hit.color * INDIRECT_ATTENUATION;
+            // Compute view direction for specular
+            let view_dir = normalize(-ray_dir);
+
+            // Evaluate direct lighting (includes diffuse and specular)
+            let direct = evaluate_direct(hit_pos, hit.normal, hit.color, view_dir, hit.roughness, hit.metallic);
+
+            // For metals on first bounce, reduce direct lighting contribution and rely more on reflections
+            let direct_weight = mix(1.0, 0.3, hit.metallic);
+            radiance = radiance + throughput * direct * direct_weight;
+
+            // Metallic surfaces keep much more energy for reflections
+            let attenuation = mix(INDIRECT_ATTENUATION, 0.95, hit.metallic);
+            throughput = throughput * hit.color * attenuation;
 
             let bounce_seed = vec3<u32>(
                 pixel_coords.x + 17u * bounce + 13u * sample,
@@ -385,7 +471,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                 sample * max_bounces + bounce + frame_seed * 1000u,
             );
             ray_origin = hit_pos + hit.normal * 1e-3;
-            ray_dir = random_in_hemisphere(hit.normal, bounce_seed);
+
+            // Use material-aware direction sampling
+            ray_dir = sample_material_direction(ray_dir, hit.normal, hit.roughness, hit.metallic, bounce_seed);
         }
 
         // If path is still active after max bounces, add environment contribution

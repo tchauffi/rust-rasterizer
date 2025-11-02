@@ -28,8 +28,8 @@ struct SceneObject {
     position: [f32; 3],
     radius: f32,
     color: [f32; 3],
-    #[allow(dead_code)]
     roughness: f32,
+    metallic: f32,
     enabled: bool,
 }
 
@@ -45,8 +45,11 @@ struct UIState {
     samples_per_pixel: u32,
     max_bounces: u32,
 
-    // Mesh color
+    // Mesh properties
     mesh_color: [f32; 3],
+    mesh_position: [f32; 3],
+    mesh_roughness: f32,
+    mesh_metallic: f32,
 
     // Scene objects
     objects: Vec<SceneObject>,
@@ -99,6 +102,7 @@ struct State {
     sphere_buffer: wgpu::Buffer,
     #[allow(dead_code)]
     bunny_mesh: Mesh,
+    original_mesh: Mesh,
 
     // Camera control
     camera_position: Vec3,
@@ -150,17 +154,18 @@ impl State {
         let bunny_material = Material::new(Vec3::new(1.0, 1.0, 1.0), 0.5);
 
         #[cfg(not(target_arch = "wasm32"))]
-        let bunny = {
-            let mut mesh = Mesh::from_obj_file("data/bunny.obj", bunny_material)
+        let (original_bunny, bunny) = {
+            let original = Mesh::from_obj_file("data/bunny.obj", bunny_material)
                 .map_err(|err| anyhow!("failed to load bunny OBJ: {err}"))?;
+            let mut mesh = original.clone();
             mesh.rotate_y(180.0);
             mesh.transform(10.0, Vec3::new(0.0, -1.0, 4.0));
             eprintln!("Bunny positioned at Z=4.0, centered around Y=-1.0");
-            mesh
+            (original, mesh)
         };
 
         #[cfg(target_arch = "wasm32")]
-        let bunny = {
+        let (original_bunny, bunny) = {
             let bunny_obj = include_str!("../../data/bunny.obj");
             log::info!(
                 "🔍 WASM BUILD: Embedded OBJ data length: {} bytes",
@@ -172,22 +177,23 @@ impl State {
                 return Err(anyhow!("Embedded bunny.obj is empty"));
             }
 
-            let mut mesh = Mesh::from_obj_str(bunny_obj, bunny_material).map_err(|err| {
+            let original = Mesh::from_obj_str(bunny_obj, bunny_material).map_err(|err| {
                 log::error!("❌ Failed to parse OBJ: {}", err);
                 anyhow!("failed to parse embedded bunny OBJ: {err}")
             })?;
 
             log::info!(
                 "✅ Parsed mesh: {} vertices, {} faces",
-                mesh.vertices.len(),
-                mesh.faces.len() / 3
+                original.vertices.len(),
+                original.faces.len() / 3
             );
 
-            if mesh.vertices.is_empty() {
+            if original.vertices.is_empty() {
                 log::error!("❌ CRITICAL: Mesh has NO VERTICES after parsing!");
                 return Err(anyhow!("Mesh has no vertices"));
             }
 
+            let mut mesh = original.clone();
             mesh.rotate_y(180.0);
             mesh.transform(10.0, Vec3::new(0.0, -1.0, 4.0));
             log::info!("✅ Transformed bunny mesh for web viewer");
@@ -200,7 +206,7 @@ impl State {
                 mesh.bounding_box.max.y,
                 mesh.bounding_box.max.z
             );
-            mesh
+            (original, mesh)
         };
 
         let sphere1 = Sphere::new(
@@ -209,11 +215,13 @@ impl State {
             Material::new(Vec3::new(1.0, 1.0, 1.0), 0.25),
         );
 
+        // Green metallic sphere - shiny like chrome
         let sphere2 = Sphere::new(
             Vec3::new(2.0, 0.0, 5.0),
             1.0,
-            Material::new(Vec3::new(0.0, 1.0, 0.0), 0.5),
+            Material::new_metallic(Vec3::new(0.8, 1.0, 0.8), 0.1), // Light green, low roughness = very shiny
         );
+        // Blue diffuse sphere for comparison
         let sphere3 = Sphere::new(
             Vec3::new(-1.6, 0.0, 5.0),
             1.0,
@@ -778,6 +786,9 @@ impl State {
                 bunny.material.color.y as f32,
                 bunny.material.color.z as f32,
             ],
+            mesh_position: [0.0, -1.0, 4.0],
+            mesh_roughness: 0.5,
+            mesh_metallic: 0.0,
             objects: vec![
                 SceneObject {
                     name: "Ground Sphere".to_string(),
@@ -785,22 +796,25 @@ impl State {
                     radius: 1000.0,
                     color: [1.0, 1.0, 1.0],
                     roughness: 0.25,
+                    metallic: 0.0, // Diffuse ground
                     enabled: true,
                 },
                 SceneObject {
-                    name: "Green Sphere".to_string(),
+                    name: "Green Metallic Sphere".to_string(),
                     position: [2.0, 0.0, 5.0],
                     radius: 1.0,
-                    color: [0.0, 1.0, 0.0],
-                    roughness: 0.5,
+                    color: [0.8, 1.0, 0.8],
+                    roughness: 0.1,
+                    metallic: 1.0, // Shiny metal
                     enabled: true,
                 },
                 SceneObject {
-                    name: "Blue Sphere".to_string(),
+                    name: "Blue Diffuse Sphere".to_string(),
                     position: [-1.6, 0.0, 5.0],
                     radius: 1.0,
                     color: [0.0, 0.0, 1.0],
                     roughness: 0.5,
+                    metallic: 0.0, // Diffuse
                     enabled: true,
                 },
             ],
@@ -826,6 +840,7 @@ impl State {
             bvh_buffer,
             sphere_buffer,
             bunny_mesh: bunny,
+            original_mesh: original_bunny,
             compute_pipeline,
             compute_pipeline_normals,
             accumulation_pipeline,
@@ -1107,6 +1122,64 @@ impl State {
             self.ui_state.mesh_color[2],
             1.0,
         ];
+
+        // Check if mesh properties have changed
+        let mesh_changed = self.bunny_mesh.material.color.x != self.ui_state.mesh_color[0] as f64
+            || self.bunny_mesh.material.color.y != self.ui_state.mesh_color[1] as f64
+            || self.bunny_mesh.material.color.z != self.ui_state.mesh_color[2] as f64
+            || self.bunny_mesh.material.roughness != self.ui_state.mesh_roughness as f64
+            || self.bunny_mesh.material.metallic != self.ui_state.mesh_metallic as f64;
+
+        // Only rebuild mesh if properties changed
+        if mesh_changed {
+            // Rebuild mesh with new transformations
+            let mut mesh = self.original_mesh.clone();
+
+            // Update mesh material
+            mesh.material.color = Vec3::new(
+                self.ui_state.mesh_color[0] as f64,
+                self.ui_state.mesh_color[1] as f64,
+                self.ui_state.mesh_color[2] as f64,
+            );
+            mesh.material.roughness = self.ui_state.mesh_roughness as f64;
+            mesh.material.metallic = self.ui_state.mesh_metallic as f64;
+
+            // Apply transformations (fixed scale and rotation from initialization)
+            mesh.rotate_y(180.0);
+            mesh.transform(
+                10.0,
+                Vec3::new(
+                    self.ui_state.mesh_position[0] as f64,
+                    self.ui_state.mesh_position[1] as f64,
+                    self.ui_state.mesh_position[2] as f64,
+                ),
+            );
+
+            // Rebuild triangle and BVH buffers
+            let (triangles, bvh_nodes) = mesh_to_gpu_data(&mesh);
+
+            self.triangle_buffer =
+                self.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("triangle-buffer"),
+                        contents: bytemuck::cast_slice(&triangles),
+                        usage: wgpu::BufferUsages::STORAGE,
+                    });
+
+            self.bvh_buffer = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("bvh-buffer"),
+                    contents: bytemuck::cast_slice(&bvh_nodes),
+                    usage: wgpu::BufferUsages::STORAGE,
+                });
+
+            // Update triangle and BVH counts
+            self.scene_uniform.resolution[2] = triangles.len() as u32; // triangle count
+            self.scene_uniform.accel_info[0] = bvh_nodes.len() as u32; // BVH node count
+            self.bunny_mesh = mesh;
+        }
+
         self.scene_uniform.render_config[0] = self.ui_state.samples_per_pixel;
         self.scene_uniform.render_config[1] = self.ui_state.max_bounces;
         self.scene_uniform.render_config[3] = self.accumulated_frames; // Frame seed for temporal variation
@@ -1117,14 +1190,18 @@ impl State {
             .objects
             .iter()
             .filter(|obj| obj.enabled)
-            .map(|obj| GpuSphere {
-                center_radius: [
-                    obj.position[0],
-                    obj.position[1],
-                    obj.position[2],
-                    obj.radius,
-                ],
-                color: [obj.color[0], obj.color[1], obj.color[2], 1.0],
+            .map(|obj| {
+                let material_type = if obj.metallic > 0.5 { 1.0 } else { 0.0 }; // 0.0 = diffuse, 1.0 = metallic
+                GpuSphere {
+                    center_radius: [
+                        obj.position[0],
+                        obj.position[1],
+                        obj.position[2],
+                        obj.radius,
+                    ],
+                    color: [obj.color[0], obj.color[1], obj.color[2], 1.0],
+                    material: [obj.roughness, obj.metallic, material_type, 0.0],
+                }
             })
             .collect();
 
@@ -1145,7 +1222,7 @@ impl State {
                 usage: wgpu::BufferUsages::STORAGE,
             });
 
-        // Recreate bind group
+        // Recreate bind group (needed because sphere buffer always changes)
         self.bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("raytracer-bind-group"),
             layout: &self.bind_group_layout,
@@ -1280,6 +1357,42 @@ impl State {
                             ui.collapsing("Mesh", |ui| {
                                 ui.label("Bunny Color:");
                                 ui.color_edit_button_rgb(&mut ui_state.mesh_color);
+
+                                ui.add_space(5.0);
+                                ui.horizontal(|ui| {
+                                    ui.label("Position:");
+                                    ui.add(
+                                        egui::DragValue::new(&mut ui_state.mesh_position[0])
+                                            .speed(0.1)
+                                            .prefix("X:"),
+                                    );
+                                    ui.add(
+                                        egui::DragValue::new(&mut ui_state.mesh_position[1])
+                                            .speed(0.1)
+                                            .prefix("Y:"),
+                                    );
+                                    ui.add(
+                                        egui::DragValue::new(&mut ui_state.mesh_position[2])
+                                            .speed(0.1)
+                                            .prefix("Z:"),
+                                    );
+                                });
+
+                                ui.horizontal(|ui| {
+                                    ui.label("Roughness:");
+                                    ui.add(egui::Slider::new(
+                                        &mut ui_state.mesh_roughness,
+                                        0.0..=1.0,
+                                    ));
+                                });
+
+                                ui.horizontal(|ui| {
+                                    ui.label("Metallic:");
+                                    ui.add(egui::Slider::new(
+                                        &mut ui_state.mesh_metallic,
+                                        0.0..=1.0,
+                                    ));
+                                });
                             });
 
                             ui.add_space(10.0);
@@ -1320,6 +1433,30 @@ impl State {
                                                     &mut obj.radius,
                                                     0.1..=5.0,
                                                 ));
+                                            });
+                                            ui.horizontal(|ui| {
+                                                ui.label("Roughness:");
+                                                if ui
+                                                    .add(egui::Slider::new(
+                                                        &mut obj.roughness,
+                                                        0.0..=1.0,
+                                                    ))
+                                                    .changed()
+                                                {
+                                                    needs_update = true;
+                                                }
+                                            });
+                                            ui.horizontal(|ui| {
+                                                ui.label("Metallic:");
+                                                if ui
+                                                    .add(egui::Slider::new(
+                                                        &mut obj.metallic,
+                                                        0.0..=1.0,
+                                                    ))
+                                                    .changed()
+                                                {
+                                                    needs_update = true;
+                                                }
                                             });
                                             ui.color_edit_button_rgb(&mut obj.color);
                                         }
@@ -1385,6 +1522,7 @@ impl State {
                                     radius: ui_state.new_object_radius,
                                     color: ui_state.new_object_color,
                                     roughness: 0.5,
+                                    metallic: 0.0,
                                     enabled: true,
                                 });
                                 ui_state.show_add_object_dialog = false;
