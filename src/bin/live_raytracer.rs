@@ -92,6 +92,10 @@ struct State {
     output_texture: wgpu::Texture,
     sampler: wgpu::Sampler,
 
+    // Environment map resources
+    environment_texture: wgpu::Texture,
+    environment_sampler: wgpu::Sampler,
+
     // Scene data
     camera: Camera,
     scene_uniform: SceneUniform,
@@ -445,6 +449,193 @@ impl State {
             view_formats: &[],
         });
 
+        // Load environment map (HDR texture)
+        #[cfg(not(target_arch = "wasm32"))]
+        let env_texture_data = {
+            use rust_raytracer::texture::Texture;
+            eprintln!("🔍 Attempting to load environment map from: data/rogland_sunset_4k.exr");
+            match Texture::from_exr("data/rogland_sunset_4k.exr") {
+                Ok(mut texture) => {
+                    eprintln!(
+                        "✅ Loaded environment map: {}x{}",
+                        texture.width, texture.height
+                    );
+
+                    // Downsample if texture is too large (GPU limit is often 2048 for older hardware)
+                    const MAX_DIM: u32 = 2048;
+                    if texture.width > MAX_DIM || texture.height > MAX_DIM {
+                        let scale =
+                            (MAX_DIM as f32 / texture.width.max(texture.height) as f32).min(1.0);
+                        let new_width = (texture.width as f32 * scale) as u32;
+                        let new_height = (texture.height as f32 * scale) as u32;
+
+                        eprintln!(
+                            "⚠️ Downsampling environment map from {}x{} to {}x{}",
+                            texture.width, texture.height, new_width, new_height
+                        );
+
+                        // Bilinear downsampling for better quality
+                        let mut new_data =
+                            Vec::with_capacity((new_width * new_height * 3) as usize);
+                        for y in 0..new_height {
+                            for x in 0..new_width {
+                                // Map to source coordinates (floating point for interpolation)
+                                let src_x = (x as f32 / new_width as f32) * texture.width as f32;
+                                let src_y = (y as f32 / new_height as f32) * texture.height as f32;
+
+                                // Get the four surrounding pixels
+                                let x0 = src_x.floor() as u32;
+                                let y0 = src_y.floor() as u32;
+                                let x1 = (x0 + 1).min(texture.width - 1);
+                                let y1 = (y0 + 1).min(texture.height - 1);
+
+                                // Calculate interpolation weights
+                                let fx = src_x - x0 as f32;
+                                let fy = src_y - y0 as f32;
+
+                                // Sample the four pixels
+                                let get_pixel = |px: u32, py: u32| -> (f32, f32, f32) {
+                                    let idx = ((py * texture.width + px) * 3) as usize;
+                                    (
+                                        texture.data[idx] as f32,
+                                        texture.data[idx + 1] as f32,
+                                        texture.data[idx + 2] as f32,
+                                    )
+                                };
+
+                                let p00 = get_pixel(x0, y0);
+                                let p10 = get_pixel(x1, y0);
+                                let p01 = get_pixel(x0, y1);
+                                let p11 = get_pixel(x1, y1);
+
+                                // Bilinear interpolation
+                                let interpolate = |v00: f32, v10: f32, v01: f32, v11: f32| -> u8 {
+                                    let top = v00 * (1.0 - fx) + v10 * fx;
+                                    let bottom = v01 * (1.0 - fx) + v11 * fx;
+                                    let result = top * (1.0 - fy) + bottom * fy;
+                                    result.clamp(0.0, 255.0) as u8
+                                };
+
+                                new_data.push(interpolate(p00.0, p10.0, p01.0, p11.0));
+                                new_data.push(interpolate(p00.1, p10.1, p01.1, p11.1));
+                                new_data.push(interpolate(p00.2, p10.2, p01.2, p11.2));
+                            }
+                        }
+
+                        texture.width = new_width;
+                        texture.height = new_height;
+                        texture.data = new_data;
+                    }
+
+                    // Validate data size
+                    let expected_size = (texture.width * texture.height * 3) as usize;
+                    if texture.data.len() != expected_size {
+                        eprintln!(
+                            "⚠️ WARNING: Texture data size mismatch! Expected {} bytes, got {} bytes",
+                            expected_size,
+                            texture.data.len()
+                        );
+                    }
+
+                    eprintln!(
+                        "📊 Final texture: {}x{}, {} bytes",
+                        texture.width,
+                        texture.height,
+                        texture.data.len()
+                    );
+
+                    Some((texture.width, texture.height, texture.data))
+                }
+                Err(e) => {
+                    eprintln!("❌ Failed to load environment map: {}, using default", e);
+                    None
+                }
+            }
+        };
+
+        #[cfg(target_arch = "wasm32")]
+        let env_texture_data: Option<(u32, u32, Vec<u8>)> = {
+            eprintln!("⚠️ Environment map not available in WASM build");
+            None
+        };
+
+        // Create environment texture (or default test pattern if loading failed)
+        let (env_width, env_height, env_data) = env_texture_data.unwrap_or_else(|| {
+            eprintln!("⚠️ Using default test pattern environment texture");
+            // Create a simple 4x4 test pattern: red, green, blue, yellow gradient
+            let mut data = Vec::new();
+            for y in 0..4 {
+                for x in 0..4 {
+                    data.push((x * 255 / 3) as u8); // Red gradient
+                    data.push((y * 255 / 3) as u8); // Green gradient
+                    data.push(128); // Blue constant
+                }
+            }
+            (4u32, 4u32, data)
+        });
+
+        let environment_texture = device.create_texture_with_data(
+            &queue,
+            &wgpu::TextureDescriptor {
+                label: Some("environment-texture"),
+                size: wgpu::Extent3d {
+                    width: env_width,
+                    height: env_height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            &{
+                // Convert RGB to RGBA
+                let mut rgba_data = Vec::with_capacity((env_width * env_height * 4) as usize);
+                for chunk in env_data.chunks(3) {
+                    rgba_data.push(chunk[0]);
+                    rgba_data.push(chunk[1]);
+                    rgba_data.push(chunk[2]);
+                    rgba_data.push(255); // Alpha
+                }
+
+                // Debug: Log some pixel values from the uploaded texture
+                eprintln!(
+                    "📤 Uploading texture to GPU: {}x{}, {} bytes",
+                    env_width,
+                    env_height,
+                    rgba_data.len()
+                );
+                eprintln!("   Sample pixels from RGBA data:");
+                for i in 0..5.min(rgba_data.len() / 4) {
+                    let idx = i * 4;
+                    eprintln!(
+                        "     Pixel {}: R={}, G={}, B={}, A={}",
+                        i,
+                        rgba_data[idx],
+                        rgba_data[idx + 1],
+                        rgba_data[idx + 2],
+                        rgba_data[idx + 3]
+                    );
+                }
+
+                rgba_data
+            },
+        );
+
+        let environment_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("environment-sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
         // Create compute pipeline for raytracing
         let compute_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -500,8 +691,27 @@ impl State {
                         },
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
                 ],
             });
+
+        let environment_texture_view =
+            environment_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("raytracer-bind-group"),
@@ -526,6 +736,14 @@ impl State {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: bvh_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&environment_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::Sampler(&environment_sampler),
                 },
             ],
         });
@@ -851,6 +1069,8 @@ impl State {
             display_bind_group_layout,
             output_texture,
             sampler,
+            environment_texture,
+            environment_sampler,
             camera_position: camera.position,
             camera_yaw: 180.0, // Start looking at +Z (toward the scene)
             camera_pitch: 0.0,
@@ -955,6 +1175,10 @@ impl State {
                 .output_texture
                 .create_view(&wgpu::TextureViewDescriptor::default());
 
+            let environment_texture_view = self
+                .environment_texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
+
             self.bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("raytracer-bind-group"),
                 layout: &self.bind_group_layout,
@@ -978,6 +1202,14 @@ impl State {
                     wgpu::BindGroupEntry {
                         binding: 4,
                         resource: self.bvh_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::TextureView(&environment_texture_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: wgpu::BindingResource::Sampler(&self.environment_sampler),
                     },
                 ],
             });
@@ -1223,6 +1455,10 @@ impl State {
             });
 
         // Recreate bind group (needed because sphere buffer always changes)
+        let environment_texture_view = self
+            .environment_texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
         self.bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("raytracer-bind-group"),
             layout: &self.bind_group_layout,
@@ -1246,6 +1482,14 @@ impl State {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: self.bvh_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&environment_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::Sampler(&self.environment_sampler),
                 },
             ],
         });
@@ -1995,6 +2239,7 @@ async fn run() -> Result<()> {
                     WindowEvent::CursorMoved { position, .. } => {
                         let current_pos = (position.x, position.y);
 
+                        #[allow(clippy::collapsible_if)]
                         if state.mouse_pressed {
                             if let Some(last_pos) = state.last_mouse_pos {
                                 let delta_x = current_pos.0 - last_pos.0;

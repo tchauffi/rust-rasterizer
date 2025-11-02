@@ -47,7 +47,6 @@ struct HitInfo {
 };
 
 const PI: f32 = 3.141592653589793;
-const INDIRECT_ATTENUATION: f32 = 0.05;
 
 @group(0) @binding(0)
 var<uniform> scene: SceneUniform;
@@ -63,6 +62,13 @@ var<storage, read_write> image: array<vec4<f32>>;
 
 @group(0) @binding(4)
 var<storage, read> bvh_nodes: array<BvhNode>;
+
+@group(0) @binding(5)
+var environment_map: texture_2d<f32>;
+
+@group(0) @binding(6)
+var environment_sampler: sampler;
+
 const BVH_STACK_SIZE: u32 = 64u;
 const LARGE_DISTANCE: f32 = 1e30;
 
@@ -130,10 +136,19 @@ fn sample_material_direction(
 }
 
 fn sky_color(ray_dir: vec3<f32>) -> vec3<f32> {
-    let t = 0.5 * (ray_dir.y + 1.0);
-    let white = vec3<f32>(1.0, 1.0, 1.0);
-    let blue = vec3<f32>(0.2, 0.3, 0.8);
-    return mix(white, blue, t);
+    // Convert ray direction to spherical UV coordinates for environment mapping
+    let dir = normalize(ray_dir);
+    let u = 0.5 + atan2(dir.z, dir.x) / (2.0 * PI);
+    let v = 0.5 - asin(dir.y) / PI;
+
+    // Wrap u and clamp v
+    let uv = vec2<f32>(fract(u), clamp(v, 0.0, 1.0));
+
+    // Sample the environment map using the sampler (this handles filtering properly)
+    let env_color = textureSampleLevel(environment_map, environment_sampler, uv, 0.0);
+
+    // Return the environment color (exposure already applied during texture loading)
+    return env_color.rgb;
 }
 
 fn intersect_triangle(origin: vec3<f32>, dir: vec3<f32>, tri: Triangle) -> HitInfo {
@@ -218,12 +233,6 @@ fn intersect_sphere(origin: vec3<f32>, dir: vec3<f32>, sph: Sphere) -> HitInfo {
     }
 
     return info;
-}
-
-fn is_shadowed(hit_pos: vec3<f32>, normal: vec3<f32>, light_dir: vec3<f32>) -> bool {
-    let shadow_origin = hit_pos + normal * 1e-3;
-    let shadow_hit = trace_ray(shadow_origin, light_dir);
-    return shadow_hit.hit;
 }
 
 fn make_safe_dir(dir: vec3<f32>) -> vec3<f32> {
@@ -359,55 +368,35 @@ fn trace_ray(origin: vec3<f32>, dir: vec3<f32>) -> HitInfo {
     return closest_hit;
 }
 
-fn evaluate_direct(
-    hit_pos: vec3<f32>,
+fn evaluate_environment(
     normal: vec3<f32>,
     albedo: vec3<f32>,
     view_dir: vec3<f32>,
     roughness: f32,
     metallic: f32
 ) -> vec3<f32> {
-    let light_dir = normalize(-scene.light_direction.xyz);
-    let light_strength = scene.light_direction.w;
-    var diffuse = max(dot(normal, light_dir), 0.0) * light_strength;
+    let n = normalize(normal);
 
-    let in_shadow = diffuse > 0.0 && is_shadowed(hit_pos, normal, light_dir);
+    // Approximate diffuse contribution by sampling the environment along the surface normal.
+    let env_diffuse = sky_color(n);
+    let diffuse = albedo * env_diffuse * (1.0 - metallic) * (1.0 / PI);
 
-    if (in_shadow) {
-        diffuse = 0.0;
-    }
+    // Approximate specular contribution by sampling the environment in the reflection direction.
+    let reflection_dir = reflect(-view_dir, n);
+    let raw_specular = sky_color(reflection_dir);
 
-    let ambient = scene.ambient_color.xyz;
-    let light_color = scene.light_color.xyz;
+    // Rough surfaces see a blurrier environment; approximate by blending with the diffuse sample.
+    let reflectivity = pow(1.0 - roughness, 4.0);
+    let env_specular = mix(env_diffuse, raw_specular, reflectivity);
 
-    // Diffuse contribution (almost zero for metallic surfaces)
-    let diffuse_contribution = mix(1.0, 0.05, metallic);
-    let diffuse_lighting = ambient + light_color * diffuse * diffuse_contribution;
-    var result = albedo * diffuse_lighting;
+    // Fresnel term (Schlick approximation) to mix specular color.
+    let f0 = mix(vec3<f32>(0.04), albedo, metallic);
+    let cos_theta = clamp(dot(normalize(view_dir), n), 0.0, 1.0);
+    let fresnel = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - cos_theta, 5.0);
 
-    // Add specular highlights (works for both plastic and metal)
-    if (!in_shadow && diffuse > 0.0) {
-        let reflect_dir = reflect(-light_dir, normal);
-        let spec_angle = max(dot(view_dir, reflect_dir), 0.0);
+    let specular = env_specular * fresnel * reflectivity;
 
-        // Convert roughness to shininess (inverse relationship)
-        // Roughness 0.0 = very shiny (high shininess ~256)
-        // Roughness 1.0 = very rough (low shininess ~4)
-        let shininess = mix(512.0, 8.0, roughness);
-        let spec_strength = pow(spec_angle, shininess);
-
-        // Metallic surfaces have colored specular, plastic/dielectric have white specular
-        let specular_color = mix(vec3<f32>(1.0), albedo, metallic);
-
-        // Specular intensity: much brighter for metallic surfaces
-        let base_intensity = mix(0.5, 3.0, metallic);
-        let specular_intensity = base_intensity * (1.0 - roughness * 0.5);
-        let specular = specular_color * spec_strength * light_strength * specular_intensity;
-
-        result = result + light_color * specular;
-    }
-
-    return result;
+    return diffuse + specular;
 }
 
 @compute @workgroup_size(8, 8)
@@ -455,15 +444,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             let view_dir = normalize(-ray_dir);
 
             // Evaluate direct lighting (includes diffuse and specular)
-            let direct = evaluate_direct(hit_pos, hit.normal, hit.color, view_dir, hit.roughness, hit.metallic);
+            let direct = evaluate_environment(hit.normal, hit.color, view_dir, hit.roughness, hit.metallic);
+            radiance = radiance + throughput * direct;
 
-            // For metals on first bounce, reduce direct lighting contribution and rely more on reflections
-            let direct_weight = mix(1.0, 0.3, hit.metallic);
-            radiance = radiance + throughput * direct * direct_weight;
-
-            // Metallic surfaces keep much more energy for reflections
-            let attenuation = mix(INDIRECT_ATTENUATION, 0.95, hit.metallic);
-            throughput = throughput * hit.color * attenuation;
+            let bounce_albedo = mix(hit.color, vec3<f32>(1.0), hit.metallic);
+            let scatter_loss = mix(0.85, 0.98, hit.metallic);
+            throughput = throughput * bounce_albedo * scatter_loss;
 
             let bounce_seed = vec3<u32>(
                 pixel_coords.x + 17u * bounce + 13u * sample,

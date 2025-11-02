@@ -1,5 +1,7 @@
 use crate::vec3::Vec3;
 use image::GenericImageView;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 const BYTES_PER_PIXEL: u32 = 3; // RGB
 
@@ -13,6 +15,7 @@ pub struct Texture {
 }
 
 /// Interpolation methods for texture sampling
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InterpolationMethod {
     Closest,
@@ -20,6 +23,7 @@ pub enum InterpolationMethod {
     Bilinear,
 }
 
+#[allow(dead_code)]
 impl Texture {
     /// Creates a new texture with the given dimensions and RGB data
     pub fn new(width: u32, height: u32, data: Vec<u8>) -> Self {
@@ -114,40 +118,89 @@ impl Texture {
         Vec3::new(r, g, b)
     }
 
-    fn get_width(&self) -> u32 {
-        self.width
-    }
-
-    fn get_height(&self) -> u32 {
-        self.height
-    }
-
     /// Loads a texture from an EXR file
     pub fn from_exr(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         use exr::prelude::*;
 
+        eprintln!("🖼️  Loading EXR file: {}", path);
+
+        let image_width = Arc::new(AtomicU32::new(0));
+        let image_height = Arc::new(AtomicU32::new(0));
+
         let image = read_first_rgba_layer_from_file(
             path,
-            |resolution, _| {
-                let width = resolution.width() as u32;
-                let height = resolution.height() as u32;
-                vec![0u8; (width * height * BYTES_PER_PIXEL) as usize]
+            {
+                let image_width = Arc::clone(&image_width);
+                let image_height = Arc::clone(&image_height);
+                move |resolution, _| {
+                    let width = resolution.width() as u32;
+                    let height = resolution.height() as u32;
+                    eprintln!("📊 EXR dimensions: {}x{}", width, height);
+                    image_width.store(width, Ordering::Relaxed);
+                    image_height.store(height, Ordering::Relaxed);
+                    vec![0u8; (width * height * BYTES_PER_PIXEL) as usize]
+                }
             },
-            |data, position, (r, g, b, _a): (f32, f32, f32, f32)| {
-                let width = data.len() as u32 / BYTES_PER_PIXEL / position.height() as u32;
-                let index = ((position.y() as u32 * width + position.x() as u32) * BYTES_PER_PIXEL)
-                    as usize;
-                data[index] = (r.clamp(0.0, 1.0) * 255.0) as u8;
-                data[index + 1] = (g.clamp(0.0, 1.0) * 255.0) as u8;
-                data[index + 2] = (b.clamp(0.0, 1.0) * 255.0) as u8;
+            {
+                let image_width = Arc::clone(&image_width);
+                move |data, position, (r, g, b, _a): (f32, f32, f32, f32)| {
+                    // Log sample pixels for debugging (every 512 pixels in each dimension)
+                    if position.x() % 512 == 0 && position.y() % 512 == 0 {
+                        let r_clamped = r.max(0.0);
+                        let g_clamped = g.max(0.0);
+                        let b_clamped = b.max(0.0);
+                        let tone_map = |x: f32| x / (1.0 + x);
+                        eprintln!(
+                            "  Pixel ({:4}, {:4}): HDR=({:8.3}, {:8.3}, {:8.3}) -> Tone-mapped=({:.3}, {:.3}, {:.3}) -> 8-bit=({}, {}, {})",
+                            position.x(),
+                            position.y(),
+                            r,
+                            g,
+                            b,
+                            tone_map(r_clamped),
+                            tone_map(g_clamped),
+                            tone_map(b_clamped),
+                            (tone_map(r_clamped) * 255.0) as u8,
+                            (tone_map(g_clamped) * 255.0) as u8,
+                            (tone_map(b_clamped) * 255.0) as u8
+                        );
+                    }
+
+                    // Calculate width from the position bounds
+                    let width = image_width.load(Ordering::Relaxed).max(1);
+                    let index = ((position.y() as u32 * width + position.x() as u32)
+                        * BYTES_PER_PIXEL) as usize;
+                    if index + 2 < data.len() {
+                        // Ensure values are positive (some EXR can have negative values)
+                        let r = r.max(0.0);
+                        let g = g.max(0.0);
+                        let b = b.max(0.0);
+
+                        // Apply exposure adjustment - multiply by a factor to brighten the image
+                        // This EXR seems to have low values, so we scale them up
+                        const EXPOSURE: f32 = 1.5;
+                        let r = r * EXPOSURE;
+                        let g = g * EXPOSURE;
+                        let b = b * EXPOSURE;
+
+                        // Apply Reinhard tone mapping to convert HDR to LDR (compress high values)
+                        // Keep in linear space - no gamma correction
+                        let tone_map = |x: f32| x / (1.0 + x);
+
+                        // Convert to 8-bit (linear space)
+                        data[index] = (tone_map(r) * 255.0).clamp(0.0, 255.0) as u8;
+                        data[index + 1] = (tone_map(g) * 255.0).clamp(0.0, 255.0) as u8;
+                        data[index + 2] = (tone_map(b) * 255.0).clamp(0.0, 255.0) as u8;
+                    }
+                }
             },
         )?;
 
-        let (data, resolution) = (image.layer_data.channel_data.pixels, image.layer_data.size);
+        let data = image.layer_data.channel_data.pixels;
 
         Ok(Texture::new(
-            resolution.width() as u32,
-            resolution.height() as u32,
+            image_width.load(Ordering::Relaxed).max(1),
+            image_height.load(Ordering::Relaxed).max(1),
             data,
         ))
     }
