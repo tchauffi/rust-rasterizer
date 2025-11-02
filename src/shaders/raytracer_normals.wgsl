@@ -23,7 +23,8 @@ struct Triangle {
 
 struct Sphere {
     center_radius: vec4<f32>, // xyz: center, w: radius
-    color: vec4<f32>,
+    color: vec4<f32>,          // xyz: color, w: unused
+    material: vec4<f32>,       // x: roughness, y: metallic, z: material_type, w: unused
 };
 
 struct BvhNode {
