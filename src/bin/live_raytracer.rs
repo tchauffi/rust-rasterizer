@@ -95,6 +95,7 @@ struct State {
 
     // Dynamic scene buffers
     triangle_buffer: wgpu::Buffer,
+    bvh_buffer: wgpu::Buffer,
     sphere_buffer: wgpu::Buffer,
     #[allow(dead_code)]
     bunny_mesh: Mesh,
@@ -160,44 +161,12 @@ impl State {
 
         #[cfg(target_arch = "wasm32")]
         let bunny = {
-            // For web, create a simple pyramid mesh since file I/O isn't available
-            use rust_raytracer::vec3::Vec3;
-
-            // Create pyramid vertices
-            let vertices = vec![
-                Vec3::new(0.0, 1.0, 0.0),    // 0: apex
-                Vec3::new(-0.5, -0.5, -0.5), // 1: base1
-                Vec3::new(0.5, -0.5, -0.5),  // 2: base2
-                Vec3::new(0.5, -0.5, 0.5),   // 3: base3
-                Vec3::new(-0.5, -0.5, 0.5),  // 4: base4
-            ];
-
-            // Create faces (triangles, 3 indices per face)
-            let faces = vec![
-                // Front face
-                0, 1, 2, // Right face
-                0, 2, 3, // Back face
-                0, 3, 4, // Left face
-                0, 4, 1, // Bottom (2 triangles)
-                1, 3, 2, 1, 4, 3,
-            ];
-
-            // Simple normals (one per vertex, pointing outward)
-            let normals = vec![
-                Vec3::new(0.0, 1.0, 0.0),    // apex
-                Vec3::new(-0.7, -0.3, -0.7), // base corners
-                Vec3::new(0.7, -0.3, -0.7),
-                Vec3::new(0.7, -0.3, 0.7),
-                Vec3::new(-0.7, -0.3, 0.7),
-            ];
-
-            let texture_coords = vec![(0.0, 0.0); 5]; // Simple UVs
-
-            let mut mesh = Mesh::new(vertices, faces, normals, texture_coords, bunny_material);
-            mesh.transform(10.0, Vec3::new(0.0, -1.0, 15.0));
-            log::info!(
-                "Created simple pyramid mesh for web (positioned at Z=4.0, centered around Y=-1.0)"
-            );
+            let bunny_obj = include_str!("../../data/bunny.obj");
+            let mut mesh = Mesh::from_obj_str(bunny_obj, bunny_material)
+                .map_err(|err| anyhow!("failed to parse embedded bunny OBJ: {err}"))?;
+            mesh.rotate_y(180.0);
+            mesh.transform(10.0, Vec3::new(0.0, -1.0, 4.0));
+            log::info!("Loaded embedded bunny mesh for web viewer");
             mesh
         };
 
@@ -214,13 +183,22 @@ impl State {
         eprintln!("Green sphere at (2.0, 0.0, 5.0), Blue sphere at (-1.6, 0.0, 5.0)");
         let spheres = [sphere2, sphere3];
 
-        let triangles = mesh_to_gpu_triangles(&bunny);
+        let (triangles, mut bvh_nodes) = mesh_to_gpu_data(&bunny);
         let triangle_count = triangles.len() as u32;
+        if bvh_nodes.is_empty() {
+            bvh_nodes.push(GpuBvhNode::zeroed());
+        }
+        let bvh_node_count = if triangle_count == 0 {
+            0
+        } else {
+            bvh_nodes.len() as u32
+        };
         let triangles_storage: Cow<[GpuTriangle]> = if triangles.is_empty() {
             Cow::Owned(vec![GpuTriangle::zeroed()])
         } else {
             Cow::Owned(triangles)
         };
+        let bvh_storage: Cow<[GpuBvhNode]> = Cow::Owned(bvh_nodes);
 
         let gpu_spheres: Vec<GpuSphere> = spheres.iter().map(sphere_to_gpu).collect();
         let sphere_count = gpu_spheres.len() as u32;
@@ -257,6 +235,7 @@ impl State {
             ambient_color: vec3_to_array(ambient_color, 0.0),
             mesh_color: vec3_to_array(bunny.material.color, 1.0),
             render_config: [samples_per_pixel, max_bounces, padded_width, 0],
+            accel_info: [bvh_node_count, 0, 0, 0],
         };
 
         // Create WGPU instance
@@ -334,6 +313,12 @@ impl State {
         let triangle_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("triangle-buffer"),
             contents: bytemuck::cast_slice(triangles_storage.as_ref()),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        let bvh_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("bvh-buffer"),
+            contents: bytemuck::cast_slice(bvh_storage.as_ref()),
             usage: wgpu::BufferUsages::STORAGE,
         });
 
@@ -446,6 +431,16 @@ impl State {
                         },
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
                 ],
             });
 
@@ -468,6 +463,10 @@ impl State {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: output_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: bvh_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -765,6 +764,7 @@ impl State {
             bind_group,
             bind_group_layout: compute_bind_group_layout,
             triangle_buffer,
+            bvh_buffer,
             sphere_buffer,
             bunny_mesh: bunny,
             compute_pipeline,
@@ -900,6 +900,10 @@ impl State {
                     wgpu::BindGroupEntry {
                         binding: 3,
                         resource: self.output_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: self.bvh_buffer.as_entire_binding(),
                     },
                 ],
             });
@@ -1102,6 +1106,10 @@ impl State {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: self.output_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.bvh_buffer.as_entire_binding(),
                 },
             ],
         });

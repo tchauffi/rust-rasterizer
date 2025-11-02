@@ -4,7 +4,7 @@ use crate::material::Material;
 use crate::ray::Ray;
 use crate::vec3::Vec3;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Cursor};
 
 #[allow(dead_code)]
 pub struct Mesh {
@@ -34,12 +34,10 @@ impl Mesh {
             bounding_box,
         }
     }
-    pub fn from_obj_file(
-        file_path: &str,
+    fn from_obj_reader<R: BufRead>(
+        reader: R,
         material: Material,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let file = File::open(file_path)?;
-        let reader = BufReader::new(file);
         let mut vertices = Vec::new();
         let mut faces = Vec::new();
         let mut normals = Vec::new();
@@ -98,6 +96,25 @@ impl Mesh {
         }
         eprintln!("Computed normals for mesh: {} normals", mesh.normals.len());
         Ok(mesh)
+    }
+
+    pub fn from_obj_file(
+        file_path: &str,
+        material: Material,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let file = File::open(file_path)?;
+        let reader = BufReader::new(file);
+        Self::from_obj_reader(reader, material)
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub fn from_obj_str(
+        data: &str,
+        material: Material,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let cursor = Cursor::new(data.as_bytes());
+        let reader = BufReader::new(cursor);
+        Self::from_obj_reader(reader, material)
     }
 
     /// Transform the mesh by scaling and translating
