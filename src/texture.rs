@@ -1,4 +1,5 @@
 use crate::vec3::Vec3;
+use image::GenericImageView;
 
 const BYTES_PER_PIXEL: u32 = 3; // RGB
 
@@ -111,6 +112,54 @@ impl Texture {
         let g = self.data[index + 1] as f64 / 255.0;
         let b = self.data[index + 2] as f64 / 255.0;
         Vec3::new(r, g, b)
+    }
+
+    fn get_width(&self) -> u32 {
+        self.width
+    }
+
+    fn get_height(&self) -> u32 {
+        self.height
+    }
+
+    /// Loads a texture from an EXR file
+    pub fn from_exr(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        use exr::prelude::*;
+
+        let image = read_first_rgba_layer_from_file(
+            path,
+            |resolution, _| {
+                let width = resolution.width() as u32;
+                let height = resolution.height() as u32;
+                vec![0u8; (width * height * BYTES_PER_PIXEL) as usize]
+            },
+            |data, position, (r, g, b, _a): (f32, f32, f32, f32)| {
+                let width = data.len() as u32 / BYTES_PER_PIXEL / position.height() as u32;
+                let index = ((position.y() as u32 * width + position.x() as u32) * BYTES_PER_PIXEL)
+                    as usize;
+                data[index] = (r.clamp(0.0, 1.0) * 255.0) as u8;
+                data[index + 1] = (g.clamp(0.0, 1.0) * 255.0) as u8;
+                data[index + 2] = (b.clamp(0.0, 1.0) * 255.0) as u8;
+            },
+        )?;
+
+        let (data, resolution) = (image.layer_data.channel_data.pixels, image.layer_data.size);
+
+        Ok(Texture::new(
+            resolution.width() as u32,
+            resolution.height() as u32,
+            data,
+        ))
+    }
+
+    /// Loads a texture from a PNG or JPG file
+    pub fn from_image(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let img = image::open(path)?;
+        let (width, height) = img.dimensions();
+        let rgb_img = img.to_rgb8();
+        let data = rgb_img.into_raw();
+
+        Ok(Texture::new(width, height, data))
     }
 }
 
