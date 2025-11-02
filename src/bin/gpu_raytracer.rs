@@ -46,13 +46,22 @@ async fn run() -> Result<()> {
     );
     let spheres = [sphere2, sphere3];
 
-    let triangles = mesh_to_gpu_triangles(&bunny);
+    let (triangles, mut bvh_nodes) = mesh_to_gpu_data(&bunny);
     let triangle_count = triangles.len() as u32;
+    if bvh_nodes.is_empty() {
+        bvh_nodes.push(GpuBvhNode::zeroed());
+    }
+    let bvh_node_count = if triangle_count == 0 {
+        0
+    } else {
+        bvh_nodes.len() as u32
+    };
     let triangles_storage: Cow<[GpuTriangle]> = if triangles.is_empty() {
         Cow::Owned(vec![GpuTriangle::zeroed()])
     } else {
         Cow::Owned(triangles)
     };
+    let bvh_storage: Cow<[GpuBvhNode]> = Cow::Owned(bvh_nodes);
 
     let gpu_spheres: Vec<GpuSphere> = spheres.iter().map(sphere_to_gpu).collect();
     let sphere_count = gpu_spheres.len() as u32;
@@ -82,6 +91,7 @@ async fn run() -> Result<()> {
         ambient_color: vec3_to_array(ambient_color, 0.0),
         mesh_color: vec3_to_array(bunny.material.color, 1.0),
         render_config: [samples_per_pixel, max_bounces, 0, 0],
+        accel_info: [bvh_node_count, 0, 0, 0],
     };
 
     let instance = wgpu::Instance::default();
@@ -115,6 +125,12 @@ async fn run() -> Result<()> {
     let triangle_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("triangle-buffer"),
         contents: bytemuck::cast_slice(triangles_storage.as_ref()),
+        usage: wgpu::BufferUsages::STORAGE,
+    });
+
+    let bvh_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("bvh-buffer"),
+        contents: bytemuck::cast_slice(bvh_storage.as_ref()),
         usage: wgpu::BufferUsages::STORAGE,
     });
 
@@ -184,6 +200,16 @@ async fn run() -> Result<()> {
                 },
                 count: None,
             },
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
         ],
     });
 
@@ -206,6 +232,10 @@ async fn run() -> Result<()> {
             wgpu::BindGroupEntry {
                 binding: 3,
                 resource: output_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: bvh_buffer.as_entire_binding(),
             },
         ],
     });

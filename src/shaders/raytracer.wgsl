@@ -9,6 +9,7 @@ struct SceneUniform {
     ambient_color: vec4<f32>,
     mesh_color: vec4<f32>,
     render_config: vec4<u32>,
+    accel_info: vec4<u32>,
 };
 
 struct Triangle {
@@ -23,6 +24,15 @@ struct Triangle {
 struct Sphere {
     center_radius: vec4<f32>, // xyz: center, w: radius
     color: vec4<f32>,
+};
+
+struct BvhNode {
+    bounds_min: vec4<f32>,
+    bounds_max: vec4<f32>,
+    left_first: u32,
+    prim_count: u32,
+    right_child: u32,
+    _padding: u32,
 };
 
 struct HitInfo {
@@ -46,6 +56,11 @@ var<storage, read> spheres: array<Sphere>;
 
 @group(0) @binding(3)
 var<storage, read_write> image: array<vec4<f32>>;
+
+@group(0) @binding(4)
+var<storage, read> bvh_nodes: array<BvhNode>;
+const BVH_STACK_SIZE: u32 = 64u;
+const LARGE_DISTANCE: f32 = 1e30;
 
 fn hash_float3(value: vec3<u32>) -> f32 {
     let value_f = vec3<f32>(f32(value.x), f32(value.y), f32(value.z));
@@ -88,7 +103,7 @@ fn sky_color(ray_dir: vec3<f32>) -> vec3<f32> {
 }
 
 fn intersect_triangle(origin: vec3<f32>, dir: vec3<f32>, tri: Triangle) -> HitInfo {
-    var info = HitInfo(1e30, vec3<f32>(0.0), vec3<f32>(0.0), false);
+    var info = HitInfo(LARGE_DISTANCE, vec3<f32>(0.0), vec3<f32>(0.0), false);
 
     let v0 = tri.v0.xyz;
     let v1 = tri.v1.xyz;
@@ -133,7 +148,7 @@ fn intersect_triangle(origin: vec3<f32>, dir: vec3<f32>, tri: Triangle) -> HitIn
 }
 
 fn intersect_sphere(origin: vec3<f32>, dir: vec3<f32>, sph: Sphere) -> HitInfo {
-    var info = HitInfo(1e30, vec3<f32>(0.0), vec3<f32>(0.0), false);
+    var info = HitInfo(LARGE_DISTANCE, vec3<f32>(0.0), vec3<f32>(0.0), false);
 
     let center = sph.center_radius.xyz;
     let radius = sph.center_radius.w;
@@ -165,14 +180,133 @@ fn intersect_sphere(origin: vec3<f32>, dir: vec3<f32>, sph: Sphere) -> HitInfo {
     return info;
 }
 
-fn trace_ray(origin: vec3<f32>, dir: vec3<f32>) -> HitInfo {
-    var closest_hit = HitInfo(1e30, vec3<f32>(0.0), vec3<f32>(0.0), false);
+fn is_shadowed(hit_pos: vec3<f32>, normal: vec3<f32>, light_dir: vec3<f32>) -> bool {
+    let shadow_origin = hit_pos + normal * 1e-3;
+    let shadow_hit = trace_ray(shadow_origin, light_dir);
+    return shadow_hit.hit;
+}
 
-    for (var i: u32 = 0u; i < scene.resolution.z; i = i + 1u) {
-        let hit = intersect_triangle(origin, dir, triangles[i]);
-        if (hit.hit && hit.dist < closest_hit.dist) {
-            closest_hit = hit;
+fn make_safe_dir(dir: vec3<f32>) -> vec3<f32> {
+    let eps = 1e-6;
+    let sign_x = select(1.0, -1.0, dir.x < 0.0);
+    let sign_y = select(1.0, -1.0, dir.y < 0.0);
+    let sign_z = select(1.0, -1.0, dir.z < 0.0);
+    let adjust_x = select(0.0, sign_x * eps, abs(dir.x) < eps);
+    let adjust_y = select(0.0, sign_y * eps, abs(dir.y) < eps);
+    let adjust_z = select(0.0, sign_z * eps, abs(dir.z) < eps);
+    return vec3<f32>(dir.x + adjust_x, dir.y + adjust_y, dir.z + adjust_z);
+}
+
+fn aabb_entry_distance(origin: vec3<f32>, inv_dir: vec3<f32>, bounds_min: vec3<f32>, bounds_max: vec3<f32>) -> f32 {
+    let t1 = (bounds_min - origin) * inv_dir;
+    let t2 = (bounds_max - origin) * inv_dir;
+    let tmin = max(max(min(t1.x, t2.x), min(t1.y, t2.y)), min(t1.z, t2.z));
+    let tmax = min(min(max(t1.x, t2.x), max(t1.y, t2.y)), max(t1.z, t2.z));
+    if (tmax >= max(tmin, 0.0)) {
+        return tmin;
+    }
+    return LARGE_DISTANCE;
+}
+
+fn traverse_triangles(origin: vec3<f32>, dir: vec3<f32>) -> HitInfo {
+    var closest_hit = HitInfo(LARGE_DISTANCE, vec3<f32>(0.0), vec3<f32>(0.0), false);
+    let triangle_count = scene.resolution.z;
+    if (triangle_count == 0u) {
+        return closest_hit;
+    }
+
+    let node_count = scene.accel_info.x;
+    if (node_count == 0u) {
+        for (var i: u32 = 0u; i < triangle_count; i = i + 1u) {
+            let hit = intersect_triangle(origin, dir, triangles[i]);
+            if (hit.hit && hit.dist < closest_hit.dist) {
+                closest_hit = hit;
+            }
         }
+        return closest_hit;
+    }
+
+    let safe_dir = make_safe_dir(dir);
+    let inv_dir = 1.0 / safe_dir;
+
+    var stack: array<u32, BVH_STACK_SIZE>;
+    var stack_size: u32 = 1u;
+    stack[0u] = 0u;
+
+    loop {
+        if (stack_size == 0u) {
+            break;
+        }
+        stack_size = stack_size - 1u;
+        let node_index = stack[stack_size];
+        if (node_index >= node_count) {
+            continue;
+        }
+        let node = bvh_nodes[node_index];
+        let entry = aabb_entry_distance(origin, inv_dir, node.bounds_min.xyz, node.bounds_max.xyz);
+        if (entry >= closest_hit.dist) {
+            continue;
+        }
+
+        if (node.prim_count > 0u) {
+            let start = node.left_first;
+            let end = start + node.prim_count;
+            for (var i = start; i < end; i = i + 1u) {
+                if (i >= triangle_count) {
+                    break;
+                }
+                let hit = intersect_triangle(origin, dir, triangles[i]);
+                if (hit.hit && hit.dist < closest_hit.dist) {
+                    closest_hit = hit;
+                }
+            }
+        } else {
+            let left = node.left_first;
+            let right = node.right_child;
+
+            var left_entry = LARGE_DISTANCE;
+            var right_entry = LARGE_DISTANCE;
+
+            if (left < node_count) {
+                let left_node = bvh_nodes[left];
+                left_entry = aabb_entry_distance(origin, inv_dir, left_node.bounds_min.xyz, left_node.bounds_max.xyz);
+            }
+            if (right < node_count) {
+                let right_node = bvh_nodes[right];
+                right_entry = aabb_entry_distance(origin, inv_dir, right_node.bounds_min.xyz, right_node.bounds_max.xyz);
+            }
+
+            if (left_entry < right_entry) {
+                if (right_entry < closest_hit.dist && stack_size < BVH_STACK_SIZE) {
+                    stack[stack_size] = right;
+                    stack_size = stack_size + 1u;
+                }
+                if (left_entry < closest_hit.dist && stack_size < BVH_STACK_SIZE) {
+                    stack[stack_size] = left;
+                    stack_size = stack_size + 1u;
+                }
+            } else {
+                if (left_entry < closest_hit.dist && stack_size < BVH_STACK_SIZE) {
+                    stack[stack_size] = left;
+                    stack_size = stack_size + 1u;
+                }
+                if (right_entry < closest_hit.dist && stack_size < BVH_STACK_SIZE) {
+                    stack[stack_size] = right;
+                    stack_size = stack_size + 1u;
+                }
+            }
+        }
+    }
+
+    return closest_hit;
+}
+
+fn trace_ray(origin: vec3<f32>, dir: vec3<f32>) -> HitInfo {
+    var closest_hit = HitInfo(LARGE_DISTANCE, vec3<f32>(0.0), vec3<f32>(0.0), false);
+
+    let triangle_hit = traverse_triangles(origin, dir);
+    if (triangle_hit.hit) {
+        closest_hit = triangle_hit;
     }
 
     for (var i: u32 = 0u; i < scene.resolution.w; i = i + 1u) {
@@ -183,12 +317,6 @@ fn trace_ray(origin: vec3<f32>, dir: vec3<f32>) -> HitInfo {
     }
 
     return closest_hit;
-}
-
-fn is_shadowed(hit_pos: vec3<f32>, normal: vec3<f32>, light_dir: vec3<f32>) -> bool {
-    let shadow_origin = hit_pos + normal * 1e-3;
-    let shadow_hit = trace_ray(shadow_origin, light_dir);
-    return shadow_hit.hit;
 }
 
 fn evaluate_direct(hit_pos: vec3<f32>, normal: vec3<f32>, albedo: vec3<f32>) -> vec3<f32> {
