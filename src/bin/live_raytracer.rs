@@ -203,6 +203,12 @@ impl State {
             mesh
         };
 
+        let sphere1 = Sphere::new(
+            Vec3::new(0.0, -1001.0, 0.0),
+            1000.0,
+            Material::new(Vec3::new(1.0, 1.0, 1.0), 0.25),
+        );
+
         let sphere2 = Sphere::new(
             Vec3::new(2.0, 0.0, 5.0),
             1.0,
@@ -214,7 +220,7 @@ impl State {
             Material::new(Vec3::new(0.0, 0.0, 1.0), 0.5),
         );
         eprintln!("Green sphere at (2.0, 0.0, 5.0), Blue sphere at (-1.6, 0.0, 5.0)");
-        let spheres = [sphere2, sphere3];
+        let spheres = [sphere1, sphere2, sphere3];
 
         let (triangles, mut bvh_nodes) = mesh_to_gpu_data(&bunny);
         let triangle_count = triangles.len() as u32;
@@ -773,6 +779,14 @@ impl State {
                 bunny.material.color.z as f32,
             ],
             objects: vec![
+                SceneObject {
+                    name: "Ground Sphere".to_string(),
+                    position: [0.0, -1001.0, 0.0],
+                    radius: 1000.0,
+                    color: [1.0, 1.0, 1.0],
+                    roughness: 0.25,
+                    enabled: true,
+                },
                 SceneObject {
                     name: "Green Sphere".to_string(),
                     position: [2.0, 0.0, 5.0],
