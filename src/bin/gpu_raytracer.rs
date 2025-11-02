@@ -80,6 +80,9 @@ async fn run() -> Result<()> {
     let samples_per_pixel = 10u32; // Increased from 10 to 100
     let max_bounces = 3u32;
 
+    // Storage buffer is laid out in tightly packed rows, so padded width just equals image width.
+    let padded_width = width;
+
     let scene_uniform = SceneUniform {
         resolution: [width, height, triangle_count, sphere_count],
         camera_position: vec3_to_array(camera.position, 0.0),
@@ -90,7 +93,7 @@ async fn run() -> Result<()> {
         light_color: vec3_to_array(directional_color, 0.0),
         ambient_color: vec3_to_array(ambient_color, 0.0),
         mesh_color: vec3_to_array(bunny.material.color, 1.0),
-        render_config: [samples_per_pixel, max_bounces, 0, 0],
+        render_config: [samples_per_pixel, max_bounces, padded_width, 0],
         accel_info: [bvh_node_count, 0, 0, 0],
     };
 
