@@ -3,6 +3,8 @@ A rasterizer implementation in Rust
 
 ![Example](doc/bunny_rotated.png)
 
+Try it online: [Live WebGPU Raytracer](https://tchauffi.github.io/rust-rasterizer/)
+
 ## Features
 
 This project includes three different raytracing implementations:
