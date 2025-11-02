@@ -874,6 +874,7 @@ impl State {
 
             // Reset accumulation on resize
             self.accumulated_frames = 0;
+            self.camera_moved = true;
 
             // Recreate bind groups with new buffers/textures
             let output_view = self
@@ -1115,6 +1116,27 @@ impl State {
         // Reset accumulation when scene changes
         self.accumulated_frames = 0;
         self.camera_moved = true;
+    }
+
+    fn padded_bytes_per_row(&self) -> u32 {
+        let bytes_per_pixel = 16u32; // 4 f32 values written per pixel
+        let unpadded = self.size.width.saturating_mul(bytes_per_pixel);
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        unpadded.div_ceil(align) * align
+    }
+
+    fn reset_accumulation_history(&mut self) {
+        let padded_bytes_per_row = self.padded_bytes_per_row();
+        if padded_bytes_per_row == 0 || self.size.height == 0 {
+            self.accumulated_frames = 0;
+            return;
+        }
+
+        let buffer_size = (padded_bytes_per_row as u64 * self.size.height as u64) as usize;
+        let zero_data = vec![0u8; buffer_size];
+        self.queue
+            .write_buffer(&self.accumulation_buffer, 0, &zero_data);
+        self.accumulated_frames = 0;
     }
 
     fn build_ui(&mut self) -> egui::FullOutput {
@@ -1401,19 +1423,11 @@ impl State {
 
         // Temporal accumulation logic
         let bytes_per_pixel = 16u32; // 4 f32s per pixel
-        let unpadded_bytes_per_row = self.size.width * bytes_per_pixel;
-        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
-        let buffer_size = (padded_bytes_per_row * self.size.height) as u64;
+        let padded_bytes_per_row = self.padded_bytes_per_row();
 
         if self.camera_moved {
-            // Clear accumulation buffer when camera moves
-            self.queue.write_buffer(
-                &self.accumulation_buffer,
-                0,
-                &vec![0u8; buffer_size as usize],
-            );
-            self.accumulated_frames = 0;
+            // Clear accumulation buffer when camera moves or scene changes
+            self.reset_accumulation_history();
             self.camera_moved = false;
         }
 
@@ -1722,6 +1736,9 @@ async fn run() -> Result<()> {
                                 match keycode {
                                     winit::keyboard::KeyCode::Space => {
                                         state.use_raytracing = !state.use_raytracing;
+                                        state.accumulated_frames = 0;
+                                        state.scene_uniform.render_config[3] = 0;
+                                        state.camera_moved = true;
                                         let mode = if state.use_raytracing {
                                             "Raytracing"
                                         } else {
