@@ -30,7 +30,19 @@ console_error_panic_hook = "0.1"
 console_log = "1.0"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
-web-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Request",
+    "RequestInit",
+    "RequestMode",
+    "Response",
+    "Document",
+    "Element",
+    "HtmlInputElement",
+    "Event",
+    "FileList",
+    "File"
+] }
 web-time = "1.1"
 js-sys = "0.3"
 

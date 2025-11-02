@@ -1,10 +1,13 @@
 use std::borrow::Cow;
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use bytemuck::Zeroable;
 use rust_raytracer::camera::Camera;
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::fs;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
@@ -21,6 +24,9 @@ use wasm_bindgen::prelude::*;
 use wgpu::util::DeviceExt;
 use winit::{event::*, event_loop::EventLoop, window::WindowBuilder};
 
+const DEFAULT_ENV_MAP: &str = "data/rogland_sunset_4k.exr";
+const MAX_ENV_DIM: u32 = 2048;
+
 // UI Scene editing state
 #[derive(Clone)]
 struct SceneObject {
@@ -34,6 +40,10 @@ struct SceneObject {
 }
 
 struct UIState {
+    // Environment controls
+    environment_maps: Vec<String>,
+    selected_environment: usize,
+
     // Lighting controls
     light_direction: [f32; 3],
     light_intensity: f32,
@@ -59,6 +69,10 @@ struct UIState {
     new_object_position: [f32; 3],
     new_object_radius: f32,
     new_object_color: [f32; 3],
+
+    // File upload dialog (WASM only)
+    #[allow(dead_code)]
+    show_file_upload_dialog: bool,
 
     // UI visibility
     show_ui: bool,
@@ -95,6 +109,8 @@ struct State {
     // Environment map resources
     environment_texture: wgpu::Texture,
     environment_sampler: wgpu::Sampler,
+    environment_path: String,
+    pending_environment_change: Option<String>,
 
     // Scene data
     camera: Camera,
@@ -139,6 +155,408 @@ struct State {
 }
 
 impl State {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn discover_environment_maps() -> Vec<String> {
+        let mut maps = Vec::new();
+        if let Ok(entries) = fs::read_dir("data") {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
+                    let ext_lower = ext.to_ascii_lowercase();
+                    if ext_lower == "exr" {
+                        maps.push(path.to_string_lossy().into_owned());
+                    }
+                }
+            }
+        }
+
+        if !maps.iter().any(|p| p == DEFAULT_ENV_MAP) {
+            maps.push(DEFAULT_ENV_MAP.to_string());
+        }
+
+        maps.sort();
+        maps
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn discover_environment_maps() -> Vec<String> {
+        vec![DEFAULT_ENV_MAP.to_string()]
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn load_environment_rgb(path: &str) -> Result<(u32, u32, Vec<u8>)> {
+        use rust_raytracer::texture::Texture;
+
+        eprintln!("🔍 Attempting to load environment map from: {}", path);
+        let mut texture = Texture::from_exr(path).map_err(|err| anyhow!(err.to_string()))?;
+        eprintln!(
+            "✅ Loaded environment map: {}x{}",
+            texture.width, texture.height
+        );
+
+        if texture.width > MAX_ENV_DIM || texture.height > MAX_ENV_DIM {
+            let scale = (MAX_ENV_DIM as f32 / texture.width.max(texture.height) as f32).min(1.0);
+            let new_width = (texture.width as f32 * scale) as u32;
+            let new_height = (texture.height as f32 * scale) as u32;
+
+            eprintln!(
+                "⚠️ Downsampling environment map from {}x{} to {}x{}",
+                texture.width, texture.height, new_width, new_height
+            );
+
+            let mut new_data = Vec::with_capacity((new_width * new_height * 3) as usize);
+            for y in 0..new_height {
+                for x in 0..new_width {
+                    let src_x = (x as f32 / new_width as f32) * texture.width as f32;
+                    let src_y = (y as f32 / new_height as f32) * texture.height as f32;
+
+                    let x0 = src_x.floor() as u32;
+                    let y0 = src_y.floor() as u32;
+                    let x1 = (x0 + 1).min(texture.width - 1);
+                    let y1 = (y0 + 1).min(texture.height - 1);
+
+                    let fx = src_x - x0 as f32;
+                    let fy = src_y - y0 as f32;
+
+                    let get_pixel = |px: u32, py: u32| -> (f32, f32, f32) {
+                        let idx = ((py * texture.width + px) * 3) as usize;
+                        (
+                            texture.data[idx] as f32,
+                            texture.data[idx + 1] as f32,
+                            texture.data[idx + 2] as f32,
+                        )
+                    };
+
+                    let p00 = get_pixel(x0, y0);
+                    let p10 = get_pixel(x1, y0);
+                    let p01 = get_pixel(x0, y1);
+                    let p11 = get_pixel(x1, y1);
+
+                    let interpolate = |v00: f32, v10: f32, v01: f32, v11: f32| -> u8 {
+                        let top = v00 * (1.0 - fx) + v10 * fx;
+                        let bottom = v01 * (1.0 - fx) + v11 * fx;
+                        let result = top * (1.0 - fy) + bottom * fy;
+                        result.clamp(0.0, 255.0) as u8
+                    };
+
+                    new_data.push(interpolate(p00.0, p10.0, p01.0, p11.0));
+                    new_data.push(interpolate(p00.1, p10.1, p01.1, p11.1));
+                    new_data.push(interpolate(p00.2, p10.2, p01.2, p11.2));
+                }
+            }
+
+            texture.width = new_width;
+            texture.height = new_height;
+            texture.data = new_data;
+        }
+
+        let expected_size = (texture.width * texture.height * 3) as usize;
+        if texture.data.len() != expected_size {
+            eprintln!(
+                "⚠️ WARNING: Texture data size mismatch! Expected {} bytes, got {} bytes",
+                expected_size,
+                texture.data.len()
+            );
+        }
+
+        eprintln!(
+            "📊 Final texture: {}x{}, {} bytes",
+            texture.width,
+            texture.height,
+            texture.data.len()
+        );
+
+        let width = texture.width;
+        let height = texture.height;
+        let data = texture.data;
+        Ok((width, height, data))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    async fn load_environment_rgb_async(path: &str) -> Result<(u32, u32, Vec<u8>)> {
+        use rust_raytracer::texture::Texture;
+        use wasm_bindgen::JsCast;
+        use wasm_bindgen_futures::JsFuture;
+        use web_sys::{Request, RequestInit, RequestMode, Response};
+
+        eprintln!(
+            "🔍 [WASM] Attempting to load environment map from: {}",
+            path
+        );
+
+        let opts = RequestInit::new();
+        opts.set_method("GET");
+        opts.set_mode(RequestMode::Cors);
+
+        let request = Request::new_with_str_and_init(path, &opts)
+            .map_err(|e| anyhow!("Failed to create request: {:?}", e))?;
+
+        let window = web_sys::window().ok_or_else(|| anyhow!("No window object"))?;
+        let resp_value = JsFuture::from(window.fetch_with_request(&request))
+            .await
+            .map_err(|e| anyhow!("Fetch failed: {:?}", e))?;
+
+        let resp: Response = resp_value
+            .dyn_into()
+            .map_err(|_| anyhow!("Response is not a Response object"))?;
+
+        if !resp.ok() {
+            return Err(anyhow!(
+                "HTTP error {}: {}",
+                resp.status(),
+                resp.status_text()
+            ));
+        }
+
+        let array_buffer = JsFuture::from(
+            resp.array_buffer()
+                .map_err(|e| anyhow!("Failed to get array buffer: {:?}", e))?,
+        )
+        .await
+        .map_err(|e| anyhow!("Failed to read array buffer: {:?}", e))?;
+
+        let uint8_array = js_sys::Uint8Array::new(&array_buffer);
+        let bytes = uint8_array.to_vec();
+
+        eprintln!("✅ [WASM] Downloaded {} bytes", bytes.len());
+
+        // Create a temporary file path for the EXR loader
+        let mut texture = Texture::from_exr_bytes(&bytes)
+            .map_err(|err| anyhow!("Failed to decode EXR: {}", err))?;
+
+        eprintln!(
+            "✅ [WASM] Loaded environment map: {}x{}",
+            texture.width, texture.height
+        );
+
+        // Downsample if needed
+        if texture.width > MAX_ENV_DIM || texture.height > MAX_ENV_DIM {
+            let scale = (MAX_ENV_DIM as f32 / texture.width.max(texture.height) as f32).min(1.0);
+            let new_width = (texture.width as f32 * scale) as u32;
+            let new_height = (texture.height as f32 * scale) as u32;
+
+            eprintln!(
+                "⚠️ [WASM] Downsampling environment map from {}x{} to {}x{}",
+                texture.width, texture.height, new_width, new_height
+            );
+
+            let mut new_data = Vec::with_capacity((new_width * new_height * 3) as usize);
+            for y in 0..new_height {
+                for x in 0..new_width {
+                    let src_x = (x as f32 / new_width as f32) * texture.width as f32;
+                    let src_y = (y as f32 / new_height as f32) * texture.height as f32;
+
+                    let x0 = src_x.floor() as u32;
+                    let y0 = src_y.floor() as u32;
+                    let x1 = (x0 + 1).min(texture.width - 1);
+                    let y1 = (y0 + 1).min(texture.height - 1);
+
+                    let fx = src_x - x0 as f32;
+                    let fy = src_y - y0 as f32;
+
+                    let get_pixel = |px: u32, py: u32| -> (f32, f32, f32) {
+                        let idx = ((py * texture.width + px) * 3) as usize;
+                        (
+                            texture.data[idx] as f32,
+                            texture.data[idx + 1] as f32,
+                            texture.data[idx + 2] as f32,
+                        )
+                    };
+
+                    let p00 = get_pixel(x0, y0);
+                    let p10 = get_pixel(x1, y0);
+                    let p01 = get_pixel(x0, y1);
+                    let p11 = get_pixel(x1, y1);
+
+                    let interpolate = |v00: f32, v10: f32, v01: f32, v11: f32| -> u8 {
+                        let top = v00 * (1.0 - fx) + v10 * fx;
+                        let bottom = v01 * (1.0 - fx) + v11 * fx;
+                        let result = top * (1.0 - fy) + bottom * fy;
+                        result.clamp(0.0, 255.0) as u8
+                    };
+
+                    new_data.push(interpolate(p00.0, p10.0, p01.0, p11.0));
+                    new_data.push(interpolate(p00.1, p10.1, p01.1, p11.1));
+                    new_data.push(interpolate(p00.2, p10.2, p01.2, p11.2));
+                }
+            }
+
+            texture.width = new_width;
+            texture.height = new_height;
+            texture.data = new_data;
+        }
+
+        eprintln!(
+            "📊 [WASM] Final texture: {}x{}, {} bytes",
+            texture.width,
+            texture.height,
+            texture.data.len()
+        );
+
+        Ok((texture.width, texture.height, texture.data))
+    }
+
+    fn create_environment_texture(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        width: u32,
+        height: u32,
+        rgb_data: &[u8],
+    ) -> wgpu::Texture {
+        let mut rgba_data = Vec::with_capacity((width * height * 4) as usize);
+        for chunk in rgb_data.chunks(3) {
+            rgba_data.push(chunk[0]);
+            rgba_data.push(chunk[1]);
+            rgba_data.push(chunk[2]);
+            rgba_data.push(255);
+        }
+
+        eprintln!(
+            "📤 Uploading texture to GPU: {}x{}, {} bytes",
+            width,
+            height,
+            rgba_data.len()
+        );
+        eprintln!("   Sample pixels from RGBA data:");
+        for i in 0..5.min(rgba_data.len() / 4) {
+            let idx = i * 4;
+            eprintln!(
+                "     Pixel {}: R={}, G={}, B={}, A={}",
+                i,
+                rgba_data[idx],
+                rgba_data[idx + 1],
+                rgba_data[idx + 2],
+                rgba_data[idx + 3]
+            );
+        }
+
+        device.create_texture_with_data(
+            queue,
+            &wgpu::TextureDescriptor {
+                label: Some("environment-texture"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            &rgba_data,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_raytracer_bind_group(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        uniform_buffer: &wgpu::Buffer,
+        triangle_buffer: &wgpu::Buffer,
+        sphere_buffer: &wgpu::Buffer,
+        output_buffer: &wgpu::Buffer,
+        bvh_buffer: &wgpu::Buffer,
+        environment_texture_view: &wgpu::TextureView,
+        environment_sampler: &wgpu::Sampler,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("raytracer-bind-group"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: triangle_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: sphere_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: output_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: bvh_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(environment_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::Sampler(environment_sampler),
+                },
+            ],
+        })
+    }
+
+    fn rebuild_raytracer_bind_group(&mut self) {
+        let environment_texture_view = self
+            .environment_texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        self.bind_group = Self::create_raytracer_bind_group(
+            &self.device,
+            &self.bind_group_layout,
+            &self.uniform_buffer,
+            &self.triangle_buffer,
+            &self.sphere_buffer,
+            &self.output_buffer,
+            &self.bvh_buffer,
+            &environment_texture_view,
+            &self.environment_sampler,
+        );
+    }
+
+    fn request_environment_change(&mut self, path: String) {
+        self.pending_environment_change = Some(path);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn reload_environment_map(&mut self, path: &str) -> Result<()> {
+        match Self::load_environment_rgb(path) {
+            Ok((width, height, rgb)) => {
+                let texture = Self::create_environment_texture(
+                    &self.device,
+                    &self.queue,
+                    width,
+                    height,
+                    &rgb,
+                );
+                self.environment_texture = texture;
+                self.environment_path = path.to_string();
+                self.rebuild_raytracer_bind_group();
+                self.reset_accumulation_history();
+                self.camera_moved = true;
+                eprintln!("✅ Environment map updated to {}", path);
+                Ok(())
+            }
+            Err(err) => {
+                eprintln!("❌ Failed to reload environment map '{}': {}", path, err);
+                Err(err)
+            }
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn reload_environment_map(&mut self, path: &str) -> Result<()> {
+        let _ = path;
+        eprintln!("⚠️ Environment map reloading is not supported on WASM");
+        Ok(())
+    }
+
     async fn new(window: Arc<winit::window::Window>) -> Result<Self> {
         let size = window.inner_size();
         // Some web platforms report zero-sized canvases until the first layout pass; clamp to 1 so surface configuration succeeds.
@@ -449,114 +867,45 @@ impl State {
             view_formats: &[],
         });
 
+        // Discover available environment maps and select initial path
+        let available_env_maps = Self::discover_environment_maps();
+        let selected_environment = available_env_maps
+            .iter()
+            .position(|p| p == DEFAULT_ENV_MAP)
+            .unwrap_or(0);
+        let active_environment = available_env_maps
+            .get(selected_environment)
+            .cloned()
+            .unwrap_or_else(|| DEFAULT_ENV_MAP.to_string());
+
         // Load environment map (HDR texture)
         #[cfg(not(target_arch = "wasm32"))]
-        let env_texture_data = {
-            use rust_raytracer::texture::Texture;
-            eprintln!("🔍 Attempting to load environment map from: data/rogland_sunset_4k.exr");
-            match Texture::from_exr("data/rogland_sunset_4k.exr") {
-                Ok(mut texture) => {
-                    eprintln!(
-                        "✅ Loaded environment map: {}x{}",
-                        texture.width, texture.height
-                    );
-
-                    // Downsample if texture is too large (GPU limit is often 2048 for older hardware)
-                    const MAX_DIM: u32 = 2048;
-                    if texture.width > MAX_DIM || texture.height > MAX_DIM {
-                        let scale =
-                            (MAX_DIM as f32 / texture.width.max(texture.height) as f32).min(1.0);
-                        let new_width = (texture.width as f32 * scale) as u32;
-                        let new_height = (texture.height as f32 * scale) as u32;
-
-                        eprintln!(
-                            "⚠️ Downsampling environment map from {}x{} to {}x{}",
-                            texture.width, texture.height, new_width, new_height
-                        );
-
-                        // Bilinear downsampling for better quality
-                        let mut new_data =
-                            Vec::with_capacity((new_width * new_height * 3) as usize);
-                        for y in 0..new_height {
-                            for x in 0..new_width {
-                                // Map to source coordinates (floating point for interpolation)
-                                let src_x = (x as f32 / new_width as f32) * texture.width as f32;
-                                let src_y = (y as f32 / new_height as f32) * texture.height as f32;
-
-                                // Get the four surrounding pixels
-                                let x0 = src_x.floor() as u32;
-                                let y0 = src_y.floor() as u32;
-                                let x1 = (x0 + 1).min(texture.width - 1);
-                                let y1 = (y0 + 1).min(texture.height - 1);
-
-                                // Calculate interpolation weights
-                                let fx = src_x - x0 as f32;
-                                let fy = src_y - y0 as f32;
-
-                                // Sample the four pixels
-                                let get_pixel = |px: u32, py: u32| -> (f32, f32, f32) {
-                                    let idx = ((py * texture.width + px) * 3) as usize;
-                                    (
-                                        texture.data[idx] as f32,
-                                        texture.data[idx + 1] as f32,
-                                        texture.data[idx + 2] as f32,
-                                    )
-                                };
-
-                                let p00 = get_pixel(x0, y0);
-                                let p10 = get_pixel(x1, y0);
-                                let p01 = get_pixel(x0, y1);
-                                let p11 = get_pixel(x1, y1);
-
-                                // Bilinear interpolation
-                                let interpolate = |v00: f32, v10: f32, v01: f32, v11: f32| -> u8 {
-                                    let top = v00 * (1.0 - fx) + v10 * fx;
-                                    let bottom = v01 * (1.0 - fx) + v11 * fx;
-                                    let result = top * (1.0 - fy) + bottom * fy;
-                                    result.clamp(0.0, 255.0) as u8
-                                };
-
-                                new_data.push(interpolate(p00.0, p10.0, p01.0, p11.0));
-                                new_data.push(interpolate(p00.1, p10.1, p01.1, p11.1));
-                                new_data.push(interpolate(p00.2, p10.2, p01.2, p11.2));
-                            }
-                        }
-
-                        texture.width = new_width;
-                        texture.height = new_height;
-                        texture.data = new_data;
-                    }
-
-                    // Validate data size
-                    let expected_size = (texture.width * texture.height * 3) as usize;
-                    if texture.data.len() != expected_size {
-                        eprintln!(
-                            "⚠️ WARNING: Texture data size mismatch! Expected {} bytes, got {} bytes",
-                            expected_size,
-                            texture.data.len()
-                        );
-                    }
-
-                    eprintln!(
-                        "📊 Final texture: {}x{}, {} bytes",
-                        texture.width,
-                        texture.height,
-                        texture.data.len()
-                    );
-
-                    Some((texture.width, texture.height, texture.data))
-                }
-                Err(e) => {
-                    eprintln!("❌ Failed to load environment map: {}, using default", e);
-                    None
-                }
+        let env_texture_data = match Self::load_environment_rgb(&active_environment) {
+            Ok(data) => Some(data),
+            Err(error) => {
+                eprintln!(
+                    "❌ Failed to load environment map '{}': {}, using default",
+                    active_environment, error
+                );
+                None
             }
         };
 
         #[cfg(target_arch = "wasm32")]
         let env_texture_data: Option<(u32, u32, Vec<u8>)> = {
-            eprintln!("⚠️ Environment map not available in WASM build");
-            None
+            match Self::load_environment_rgb_async(&active_environment).await {
+                Ok(data) => {
+                    eprintln!("✅ [WASM] Successfully loaded environment map");
+                    Some(data)
+                }
+                Err(error) => {
+                    eprintln!(
+                        "❌ [WASM] Failed to load environment map '{}': {}, using default",
+                        active_environment, error
+                    );
+                    None
+                }
+            }
         };
 
         // Create environment texture (or default test pattern if loading failed)
@@ -574,56 +923,8 @@ impl State {
             (4u32, 4u32, data)
         });
 
-        let environment_texture = device.create_texture_with_data(
-            &queue,
-            &wgpu::TextureDescriptor {
-                label: Some("environment-texture"),
-                size: wgpu::Extent3d {
-                    width: env_width,
-                    height: env_height,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            },
-            wgpu::util::TextureDataOrder::LayerMajor,
-            &{
-                // Convert RGB to RGBA
-                let mut rgba_data = Vec::with_capacity((env_width * env_height * 4) as usize);
-                for chunk in env_data.chunks(3) {
-                    rgba_data.push(chunk[0]);
-                    rgba_data.push(chunk[1]);
-                    rgba_data.push(chunk[2]);
-                    rgba_data.push(255); // Alpha
-                }
-
-                // Debug: Log some pixel values from the uploaded texture
-                eprintln!(
-                    "📤 Uploading texture to GPU: {}x{}, {} bytes",
-                    env_width,
-                    env_height,
-                    rgba_data.len()
-                );
-                eprintln!("   Sample pixels from RGBA data:");
-                for i in 0..5.min(rgba_data.len() / 4) {
-                    let idx = i * 4;
-                    eprintln!(
-                        "     Pixel {}: R={}, G={}, B={}, A={}",
-                        i,
-                        rgba_data[idx],
-                        rgba_data[idx + 1],
-                        rgba_data[idx + 2],
-                        rgba_data[idx + 3]
-                    );
-                }
-
-                rgba_data
-            },
-        );
+        let environment_texture =
+            Self::create_environment_texture(&device, &queue, env_width, env_height, &env_data);
 
         let environment_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("environment-sampler"),
@@ -713,40 +1014,17 @@ impl State {
         let environment_texture_view =
             environment_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("raytracer-bind-group"),
-            layout: &compute_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: uniform_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: triangle_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: sphere_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: output_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: bvh_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: wgpu::BindingResource::TextureView(&environment_texture_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 6,
-                    resource: wgpu::BindingResource::Sampler(&environment_sampler),
-                },
-            ],
-        });
+        let bind_group = State::create_raytracer_bind_group(
+            &device,
+            &compute_bind_group_layout,
+            &uniform_buffer,
+            &triangle_buffer,
+            &sphere_buffer,
+            &output_buffer,
+            &bvh_buffer,
+            &environment_texture_view,
+            &environment_sampler,
+        );
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("raytracer-shader"),
@@ -984,6 +1262,8 @@ impl State {
 
         // Initialize UI state
         let ui_state = UIState {
+            environment_maps: available_env_maps.clone(),
+            selected_environment,
             light_direction: [
                 directional_dir.x as f32,
                 directional_dir.y as f32,
@@ -1040,6 +1320,7 @@ impl State {
             new_object_position: [0.0, 0.0, 5.0],
             new_object_radius: 1.0,
             new_object_color: [1.0, 1.0, 1.0],
+            show_file_upload_dialog: false,
             show_ui: true,
         };
 
@@ -1071,6 +1352,8 @@ impl State {
             sampler,
             environment_texture,
             environment_sampler,
+            environment_path: active_environment.clone(),
+            pending_environment_change: None,
             camera_position: camera.position,
             camera_yaw: 180.0, // Start looking at +Z (toward the scene)
             camera_pitch: 0.0,
@@ -1455,44 +1738,7 @@ impl State {
             });
 
         // Recreate bind group (needed because sphere buffer always changes)
-        let environment_texture_view = self
-            .environment_texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
-        self.bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("raytracer-bind-group"),
-            layout: &self.bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.uniform_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: self.triangle_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: self.sphere_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: self.output_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: self.bvh_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: wgpu::BindingResource::TextureView(&environment_texture_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 6,
-                    resource: wgpu::BindingResource::Sampler(&self.environment_sampler),
-                },
-            ],
-        });
+        self.rebuild_raytracer_bind_group();
 
         // Upload uniform buffer
         self.queue.write_buffer(
@@ -1529,12 +1775,16 @@ impl State {
 
     fn build_ui(&mut self) -> egui::FullOutput {
         let raw_input = self.egui_state.take_egui_input(&self.window);
-        let ui_state = &mut self.ui_state;
         let current_fps = self.current_fps;
         let use_raytracing = self.use_raytracing;
+        let current_environment_path = self.environment_path.clone();
+        let accumulated_frames = self.accumulated_frames;
         let mut needs_update = false;
+        let mut requested_environment: Option<String> = None;
 
-        let full_output = self.egui_ctx.run(raw_input, |ctx| {
+        let full_output = {
+            let ui_state = &mut self.ui_state;
+            self.egui_ctx.run(raw_input, |ctx| {
             if ui_state.show_ui {
                 egui::SidePanel::right("scene_editor")
                     .default_width(320.0)
@@ -1544,8 +1794,81 @@ impl State {
                             ui.heading("Scene Editor");
                             ui.separator();
 
-                            ui.collapsing("Lighting", |ui| {
-                                ui.label("Directional Light:");
+                            ui.collapsing("Environment Lighting", |ui| {
+                                if ui_state.environment_maps.is_empty() {
+                                    ui.label("No HDR maps found in ./data (looking for .exr).");
+                                } else {
+                                    if ui_state.selected_environment
+                                        >= ui_state.environment_maps.len()
+                                    {
+                                        ui_state.selected_environment = 0;
+                                    }
+                                    let current_label = Path::new(current_environment_path.as_str())
+                                        .file_name()
+                                        .and_then(|name| name.to_str())
+                                        .unwrap_or(current_environment_path.as_str());
+                                    let mut env_changed = false;
+                                    egui::ComboBox::from_label("HDR Map")
+                                        .selected_text(current_label)
+                                        .show_ui(ui, |ui| {
+                                            for (idx, path) in ui_state.environment_maps.iter().enumerate() {
+                                                let label = Path::new(path)
+                                                    .file_name()
+                                                    .and_then(|name| name.to_str())
+                                                    .unwrap_or(path);
+                                                if ui
+                                                    .selectable_value(
+                                                        &mut ui_state.selected_environment,
+                                                        idx,
+                                                        label,
+                                                    )
+                                                    .changed()
+                                                {
+                                                    env_changed = true;
+                                                }
+                                            }
+                                        });
+                                    if env_changed {
+                                        requested_environment =
+                                            ui_state.environment_maps.get(ui_state.selected_environment).cloned();
+                                    }
+                                    if ui.button("Reload Selected").clicked() {
+                                        requested_environment =
+                                            ui_state.environment_maps.get(ui_state.selected_environment).cloned();
+                                    }
+                                }
+
+                                ui.add_space(10.0);
+                                ui.separator();
+
+                                #[cfg(not(target_arch = "wasm32"))]
+                                {
+                                    ui.label("📁 Upload Custom HDR Map:");
+                                    ui.label("Place .exr files in the ./data folder");
+                                    ui.label("and restart the application.");
+                                }
+
+                                #[cfg(target_arch = "wasm32")]
+                                {
+                                    ui.label("📁 Add Custom HDR Maps:");
+                                    if ui.button("How to upload...").clicked() {
+                                        ui_state.show_file_upload_dialog = true;
+                                    }
+                                }
+
+                                ui.add_space(5.0);
+                                let active_display =
+                                    format!("{}", Path::new(current_environment_path.as_str()).display());
+                                ui.label("Current map:");
+                                ui.monospace(active_display);
+                                ui.label(
+                                    "HDR data is tone-mapped when loaded. Re-select to apply file edits.",
+                                );
+                            });
+
+                            ui.add_space(10.0);
+                            ui.collapsing("Additional Lights", |ui| {
+                                ui.label("Directional Light (legacy):");
                                 ui.horizontal(|ui| {
                                     ui.label("Direction:");
                                     ui.add(
@@ -1563,10 +1886,9 @@ impl State {
                                 });
                                 ui.horizontal(|ui| {
                                     ui.label("Intensity:");
-                                    ui.add(egui::Slider::new(
-                                        &mut ui_state.light_intensity,
-                                        0.0..=2.0,
-                                    ));
+                                    ui.add(
+                                        egui::Slider::new(&mut ui_state.light_intensity, 0.0..=2.0),
+                                    );
                                 });
                                 ui.color_edit_button_rgb(&mut ui_state.light_color);
 
@@ -1574,10 +1896,9 @@ impl State {
                                 ui.label("Ambient Light:");
                                 ui.horizontal(|ui| {
                                     ui.label("Intensity:");
-                                    ui.add(egui::Slider::new(
-                                        &mut ui_state.ambient_intensity,
-                                        0.0..=1.0,
-                                    ));
+                                    ui.add(
+                                        egui::Slider::new(&mut ui_state.ambient_intensity, 0.0..=1.0),
+                                    );
                                 });
                                 ui.color_edit_button_rgb(&mut ui_state.ambient_color);
                             });
@@ -1779,6 +2100,45 @@ impl State {
                     });
             }
 
+            // File upload dialog (WASM only)
+            #[cfg(target_arch = "wasm32")]
+            if ui_state.show_file_upload_dialog {
+                egui::Window::new("Upload HDR Environment Map")
+                    .collapsible(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ctx, |ui| {
+                        ui.heading("How to add custom HDR maps:");
+                        ui.add_space(10.0);
+
+                        ui.label("To use your own HDR environment maps:");
+                        ui.add_space(5.0);
+
+                        ui.label("1. Place your .exr files in the /data folder");
+                        ui.label("2. Rebuild the WASM app with: trunk build --release");
+                        ui.label("3. The new maps will appear in the dropdown");
+
+                        ui.add_space(10.0);
+                        ui.separator();
+                        ui.add_space(10.0);
+
+                        ui.label("💡 Tip: You can find free HDR maps at:");
+                        if ui.link("polyhaven.com/hdris").clicked() {
+                            if let Some(window) = web_sys::window() {
+                                let _ = window.open_with_url("https://polyhaven.com/hdris");
+                            }
+                        }
+
+                        ui.add_space(10.0);
+                        ui.label("Supported format: OpenEXR (.exr)");
+                        ui.label("HDR maps are tone-mapped when loaded.");
+
+                        ui.add_space(10.0);
+                        if ui.button("Close").clicked() {
+                            ui_state.show_file_upload_dialog = false;
+                        }
+                    });
+            }
+
             // FPS overlay
             egui::Area::new(egui::Id::new("fps"))
                 .fixed_pos(egui::pos2(10.0, 10.0))
@@ -1792,14 +2152,19 @@ impl State {
                             "Normals"
                         }
                     ));
-                    ui.label(format!("Accumulated Frames: {}", self.accumulated_frames));
+                    ui.label(format!("Accumulated Frames: {}", accumulated_frames));
                     ui.label("Press TAB to toggle UI");
                     ui.label("Press SPACE to toggle render mode");
                 });
-        });
+            })
+        };
 
         self.egui_state
             .handle_platform_output(&self.window, full_output.platform_output.clone());
+
+        if let Some(path) = requested_environment {
+            self.request_environment_change(path);
+        }
 
         // Update scene if needed
         if needs_update {
@@ -1810,6 +2175,12 @@ impl State {
     }
 
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+        if let Some(path) = self.pending_environment_change.take() {
+            self.reload_environment_map(&path).unwrap_or_else(|err| {
+                eprintln!("❌ Failed to apply environment '{}': {}", path, err)
+            });
+        }
+
         // Update FPS
         self.frame_count += 1;
         let elapsed = self.fps_timer.elapsed().as_secs_f32();

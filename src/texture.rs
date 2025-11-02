@@ -118,6 +118,73 @@ impl Texture {
         Vec3::new(r, g, b)
     }
 
+    /// Loads a texture from EXR bytes (for WASM)
+    pub fn from_exr_bytes(bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
+        use exr::prelude::*;
+
+        eprintln!("🖼️  Loading EXR from {} bytes", bytes.len());
+
+        // Write bytes to a temporary in-memory cursor and use the file-based reader
+        let cursor = std::io::Cursor::new(bytes);
+
+        let image_width = Arc::new(AtomicU32::new(0));
+        let image_height = Arc::new(AtomicU32::new(0));
+
+        let image = read()
+            .no_deep_data()
+            .largest_resolution_level()
+            .rgba_channels(
+                {
+                    let image_width = Arc::clone(&image_width);
+                    let image_height = Arc::clone(&image_height);
+                    move |resolution, _| {
+                        let width = resolution.width() as u32;
+                        let height = resolution.height() as u32;
+                        eprintln!("📊 EXR dimensions: {}x{}", width, height);
+                        image_width.store(width, Ordering::Relaxed);
+                        image_height.store(height, Ordering::Relaxed);
+                        vec![0u8; (width * height * BYTES_PER_PIXEL) as usize]
+                    }
+                },
+                {
+                    let image_width = Arc::clone(&image_width);
+                    move |data, position, (r, g, b, _a): (f32, f32, f32, f32)| {
+                        let width = image_width.load(Ordering::Relaxed).max(1);
+                        let index = ((position.y() as u32 * width + position.x() as u32)
+                            * BYTES_PER_PIXEL) as usize;
+                        if index + 2 < data.len() {
+                            let r = r.max(0.0);
+                            let g = g.max(0.0);
+                            let b = b.max(0.0);
+
+                            const EXPOSURE: f32 = 1.5;
+                            let r = r * EXPOSURE;
+                            let g = g * EXPOSURE;
+                            let b = b * EXPOSURE;
+
+                            let tone_map = |x: f32| x / (1.0 + x);
+
+                            data[index] = (tone_map(r) * 255.0).clamp(0.0, 255.0) as u8;
+                            data[index + 1] = (tone_map(g) * 255.0).clamp(0.0, 255.0) as u8;
+                            data[index + 2] = (tone_map(b) * 255.0).clamp(0.0, 255.0) as u8;
+                        }
+                    }
+                },
+            )
+            .first_valid_layer()
+            .all_attributes()
+            .from_buffered(cursor)?;
+
+        let layer = &image.layer_data;
+        let data = layer.channel_data.pixels.clone();
+
+        Ok(Texture::new(
+            image_width.load(Ordering::Relaxed).max(1),
+            image_height.load(Ordering::Relaxed).max(1),
+            data,
+        ))
+    }
+
     /// Loads a texture from an EXR file
     pub fn from_exr(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         use exr::prelude::*;
