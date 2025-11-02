@@ -160,44 +160,12 @@ impl State {
 
         #[cfg(target_arch = "wasm32")]
         let bunny = {
-            // For web, create a simple pyramid mesh since file I/O isn't available
-            use rust_raytracer::vec3::Vec3;
-
-            // Create pyramid vertices
-            let vertices = vec![
-                Vec3::new(0.0, 1.0, 0.0),    // 0: apex
-                Vec3::new(-0.5, -0.5, -0.5), // 1: base1
-                Vec3::new(0.5, -0.5, -0.5),  // 2: base2
-                Vec3::new(0.5, -0.5, 0.5),   // 3: base3
-                Vec3::new(-0.5, -0.5, 0.5),  // 4: base4
-            ];
-
-            // Create faces (triangles, 3 indices per face)
-            let faces = vec![
-                // Front face
-                0, 1, 2, // Right face
-                0, 2, 3, // Back face
-                0, 3, 4, // Left face
-                0, 4, 1, // Bottom (2 triangles)
-                1, 3, 2, 1, 4, 3,
-            ];
-
-            // Simple normals (one per vertex, pointing outward)
-            let normals = vec![
-                Vec3::new(0.0, 1.0, 0.0),    // apex
-                Vec3::new(-0.7, -0.3, -0.7), // base corners
-                Vec3::new(0.7, -0.3, -0.7),
-                Vec3::new(0.7, -0.3, 0.7),
-                Vec3::new(-0.7, -0.3, 0.7),
-            ];
-
-            let texture_coords = vec![(0.0, 0.0); 5]; // Simple UVs
-
-            let mut mesh = Mesh::new(vertices, faces, normals, texture_coords, bunny_material);
-            mesh.transform(10.0, Vec3::new(0.0, -1.0, 15.0));
-            log::info!(
-                "Created simple pyramid mesh for web (positioned at Z=4.0, centered around Y=-1.0)"
-            );
+            let bunny_obj = include_str!("../../data/bunny.obj");
+            let mut mesh = Mesh::from_obj_str(bunny_obj, bunny_material)
+                .map_err(|err| anyhow!("failed to parse embedded bunny OBJ: {err}"))?;
+            mesh.rotate_y(180.0);
+            mesh.transform(10.0, Vec3::new(0.0, -1.0, 4.0));
+            log::info!("Loaded embedded bunny mesh for web viewer");
             mesh
         };
 
