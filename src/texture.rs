@@ -164,9 +164,22 @@ impl Texture {
 
                             let tone_map = |x: f32| x / (1.0 + x);
 
-                            data[index] = (tone_map(r) * 255.0).clamp(0.0, 255.0) as u8;
-                            data[index + 1] = (tone_map(g) * 255.0).clamp(0.0, 255.0) as u8;
-                            data[index + 2] = (tone_map(b) * 255.0).clamp(0.0, 255.0) as u8;
+                            // Apply dithering to reduce banding artifacts
+                            let dither_matrix = [
+                                [0.0, 0.5, 0.125, 0.625],
+                                [0.75, 0.25, 0.875, 0.375],
+                                [0.1875, 0.6875, 0.0625, 0.5625],
+                                [0.9375, 0.4375, 0.8125, 0.3125],
+                            ];
+                            let dither_value = dither_matrix[position.y() % 4][position.x() % 4];
+                            let dither_amount = (dither_value - 0.5) / 255.0;
+
+                            data[index] =
+                                ((tone_map(r) + dither_amount) * 255.0).clamp(0.0, 255.0) as u8;
+                            data[index + 1] =
+                                ((tone_map(g) + dither_amount) * 255.0).clamp(0.0, 255.0) as u8;
+                            data[index + 2] =
+                                ((tone_map(b) + dither_amount) * 255.0).clamp(0.0, 255.0) as u8;
                         }
                     }
                 },
@@ -254,10 +267,24 @@ impl Texture {
                         // Keep in linear space - no gamma correction
                         let tone_map = |x: f32| x / (1.0 + x);
 
-                        // Convert to 8-bit (linear space)
-                        data[index] = (tone_map(r) * 255.0).clamp(0.0, 255.0) as u8;
-                        data[index + 1] = (tone_map(g) * 255.0).clamp(0.0, 255.0) as u8;
-                        data[index + 2] = (tone_map(b) * 255.0).clamp(0.0, 255.0) as u8;
+                        // Apply dithering to reduce banding artifacts
+                        // Simple ordered dithering using pixel position
+                        let dither_matrix = [
+                            [0.0, 0.5, 0.125, 0.625],
+                            [0.75, 0.25, 0.875, 0.375],
+                            [0.1875, 0.6875, 0.0625, 0.5625],
+                            [0.9375, 0.4375, 0.8125, 0.3125],
+                        ];
+                        let dither_value = dither_matrix[position.y() % 4][position.x() % 4];
+                        let dither_amount = (dither_value - 0.5) / 255.0; // Small dither in 0-1 range
+
+                        // Convert to 8-bit with dithering (linear space)
+                        data[index] =
+                            ((tone_map(r) + dither_amount) * 255.0).clamp(0.0, 255.0) as u8;
+                        data[index + 1] =
+                            ((tone_map(g) + dither_amount) * 255.0).clamp(0.0, 255.0) as u8;
+                        data[index + 2] =
+                            ((tone_map(b) + dither_amount) * 255.0).clamp(0.0, 255.0) as u8;
                     }
                 }
             },
