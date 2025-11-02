@@ -4,13 +4,62 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 use bytemuck::Zeroable;
 use rust_raytracer::camera::Camera;
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
+
+// WASM support
 use rust_raytracer::gpu_scene::*;
 use rust_raytracer::material::Material;
 use rust_raytracer::mesh::Mesh;
 use rust_raytracer::sphere::Sphere;
 use rust_raytracer::vec3::Vec3;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
 use wgpu::util::DeviceExt;
 use winit::{event::*, event_loop::EventLoop, window::WindowBuilder};
+
+// UI Scene editing state
+#[derive(Clone)]
+struct SceneObject {
+    name: String,
+    position: [f32; 3],
+    radius: f32,
+    color: [f32; 3],
+    #[allow(dead_code)]
+    roughness: f32,
+    enabled: bool,
+}
+
+struct UIState {
+    // Lighting controls
+    light_direction: [f32; 3],
+    light_intensity: f32,
+    light_color: [f32; 3],
+    ambient_intensity: f32,
+    ambient_color: [f32; 3],
+
+    // Render settings
+    samples_per_pixel: u32,
+    max_bounces: u32,
+
+    // Mesh color
+    mesh_color: [f32; 3],
+
+    // Scene objects
+    objects: Vec<SceneObject>,
+
+    // Add object dialog
+    show_add_object_dialog: bool,
+    new_object_position: [f32; 3],
+    new_object_radius: f32,
+    new_object_color: [f32; 3],
+
+    // UI visibility
+    show_ui: bool,
+}
 
 struct State {
     surface: wgpu::Surface<'static>,
@@ -24,17 +73,31 @@ struct State {
     uniform_buffer: wgpu::Buffer,
     output_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    bind_group_layout: wgpu::BindGroupLayout,
     compute_pipeline: wgpu::ComputePipeline,
     compute_pipeline_normals: wgpu::ComputePipeline,
+
+    // Accumulation resources
+    accumulation_pipeline: wgpu::ComputePipeline,
+    accumulation_bind_group: wgpu::BindGroup,
+    accumulation_uniform_buffer: wgpu::Buffer,
 
     // Display resources
     display_pipeline: wgpu::RenderPipeline,
     display_bind_group: wgpu::BindGroup,
+    display_bind_group_layout: wgpu::BindGroupLayout,
     output_texture: wgpu::Texture,
+    sampler: wgpu::Sampler,
 
     // Scene data
     camera: Camera,
     scene_uniform: SceneUniform,
+
+    // Dynamic scene buffers
+    triangle_buffer: wgpu::Buffer,
+    sphere_buffer: wgpu::Buffer,
+    #[allow(dead_code)]
+    bunny_mesh: Mesh,
 
     // Camera control
     camera_position: Vec3,
@@ -48,17 +111,30 @@ struct State {
     // Render mode
     use_raytracing: bool, // true = raytracing, false = normals view
 
+    // Temporal accumulation
+    accumulation_buffer: wgpu::Buffer,
+    accumulation_texture: wgpu::Texture,
+    accumulated_frames: u32,
+    camera_moved: bool,
+
     // FPS tracking
     frame_count: u32,
-    fps_timer: std::time::Instant,
+    fps_timer: Instant,
     current_fps: f32,
+
+    // UI
+    egui_renderer: egui_wgpu::Renderer,
+    egui_state: egui_winit::State,
+    egui_ctx: egui::Context,
+    ui_state: UIState,
 }
 
 impl State {
     async fn new(window: Arc<winit::window::Window>) -> Result<Self> {
         let size = window.inner_size();
-        let width = size.width;
-        let height = size.height;
+        // Some web platforms report zero-sized canvases until the first layout pass; clamp to 1 so surface configuration succeeds.
+        let width = size.width.max(1);
+        let height = size.height.max(1);
 
         // Setup scene
         let camera = Camera::new(
@@ -71,12 +147,59 @@ impl State {
         );
 
         let bunny_material = Material::new(Vec3::new(1.0, 1.0, 1.0), 0.5);
-        let mut bunny = Mesh::from_obj_file("data/bunny.obj", bunny_material)
-            .map_err(|err| anyhow!("failed to load bunny OBJ: {err}"))?;
-        bunny.rotate_y(180.0);
-        bunny.transform(10.0, Vec3::new(0.0, -1.0, 4.0));
 
-        eprintln!("Bunny positioned at Z=4.0, centered around Y=-1.0");
+        #[cfg(not(target_arch = "wasm32"))]
+        let bunny = {
+            let mut mesh = Mesh::from_obj_file("data/bunny.obj", bunny_material)
+                .map_err(|err| anyhow!("failed to load bunny OBJ: {err}"))?;
+            mesh.rotate_y(180.0);
+            mesh.transform(10.0, Vec3::new(0.0, -1.0, 4.0));
+            eprintln!("Bunny positioned at Z=4.0, centered around Y=-1.0");
+            mesh
+        };
+
+        #[cfg(target_arch = "wasm32")]
+        let bunny = {
+            // For web, create a simple pyramid mesh since file I/O isn't available
+            use rust_raytracer::vec3::Vec3;
+
+            // Create pyramid vertices
+            let vertices = vec![
+                Vec3::new(0.0, 1.0, 0.0),    // 0: apex
+                Vec3::new(-0.5, -0.5, -0.5), // 1: base1
+                Vec3::new(0.5, -0.5, -0.5),  // 2: base2
+                Vec3::new(0.5, -0.5, 0.5),   // 3: base3
+                Vec3::new(-0.5, -0.5, 0.5),  // 4: base4
+            ];
+
+            // Create faces (triangles, 3 indices per face)
+            let faces = vec![
+                // Front face
+                0, 1, 2, // Right face
+                0, 2, 3, // Back face
+                0, 3, 4, // Left face
+                0, 4, 1, // Bottom (2 triangles)
+                1, 3, 2, 1, 4, 3,
+            ];
+
+            // Simple normals (one per vertex, pointing outward)
+            let normals = vec![
+                Vec3::new(0.0, 1.0, 0.0),    // apex
+                Vec3::new(-0.7, -0.3, -0.7), // base corners
+                Vec3::new(0.7, -0.3, -0.7),
+                Vec3::new(0.7, -0.3, 0.7),
+                Vec3::new(-0.7, -0.3, 0.7),
+            ];
+
+            let texture_coords = vec![(0.0, 0.0); 5]; // Simple UVs
+
+            let mut mesh = Mesh::new(vertices, faces, normals, texture_coords, bunny_material);
+            mesh.transform(10.0, Vec3::new(0.0, -1.0, 15.0));
+            log::info!(
+                "Created simple pyramid mesh for web (positioned at Z=4.0, centered around Y=-1.0)"
+            );
+            mesh
+        };
 
         let sphere2 = Sphere::new(
             Vec3::new(2.0, 0.0, 5.0),
@@ -116,6 +239,13 @@ impl State {
         let samples_per_pixel = 1u32; // 1 sample for real-time interactivity
         let max_bounces = 2u32; // Reduced bounces for speed
 
+        // Calculate padded width for buffer alignment
+        let bytes_per_pixel = 16u32;
+        let unpadded_bytes_per_row = width * bytes_per_pixel;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
+        let padded_width = padded_bytes_per_row / bytes_per_pixel;
+
         let scene_uniform = SceneUniform {
             resolution: [width, height, triangle_count, sphere_count],
             camera_position: vec3_to_array(camera.position, 0.0),
@@ -126,7 +256,7 @@ impl State {
             light_color: vec3_to_array(directional_color, 0.0),
             ambient_color: vec3_to_array(ambient_color, 0.0),
             mesh_color: vec3_to_array(bunny.material.color, 1.0),
-            render_config: [samples_per_pixel, max_bounces, 0, 0],
+            render_config: [samples_per_pixel, max_bounces, padded_width, 0],
         };
 
         // Create WGPU instance
@@ -136,19 +266,38 @@ impl State {
 
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
+                power_preference: if cfg!(target_arch = "wasm32") {
+                    wgpu::PowerPreference::LowPower
+                } else {
+                    wgpu::PowerPreference::HighPerformance
+                },
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
             })
             .await
             .context("failed to find GPU adapter")?;
 
+        #[cfg(target_arch = "wasm32")]
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("gpu-raytracer-device"),
                     required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
+                    // Use the adapter-provided limits to avoid exceeding WebGL capabilities
+                    required_limits: adapter.limits(),
+                },
+                None,
+            )
+            .await
+            .context("failed to create device")?;
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let (device, queue) = adapter
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    label: Some("gpu-raytracer-device"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: wgpu::Limits::downlevel_defaults(),
                 },
                 None,
             )
@@ -194,13 +343,27 @@ impl State {
             usage: wgpu::BufferUsages::STORAGE,
         });
 
-        let pixel_stride = (std::mem::size_of::<f32>() * 4) as u64;
-        let output_buffer_size = pixel_stride * width as u64 * height as u64;
+        // Calculate buffer size with row padding (256-byte alignment for copy operations)
+        let bytes_per_pixel = 16u32; // 4 f32s per pixel
+        let unpadded_bytes_per_row = width * bytes_per_pixel;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
+        let output_buffer_size = (padded_bytes_per_row * height) as u64;
 
         let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("output-buffer"),
             size: output_buffer_size,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        // Create accumulation buffer for temporal accumulation
+        let accumulation_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("accumulation-buffer"),
+            size: output_buffer_size,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
@@ -217,6 +380,24 @@ impl State {
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba32Float,
             usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+
+        // Create accumulation texture for temporal accumulation
+        let accumulation_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("accumulation-texture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
 
@@ -313,7 +494,7 @@ impl State {
             });
 
         let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("raytracer-pipeline"),
+            label: Some("Compute Pipeline"),
             layout: Some(&compute_pipeline_layout),
             module: &shader,
             entry_point: "main",
@@ -324,6 +505,92 @@ impl State {
                 label: Some("raytracer-normals-pipeline"),
                 layout: Some(&compute_pipeline_layout),
                 module: &shader_normals,
+                entry_point: "main",
+            });
+
+        // Create accumulation pipeline
+        let accumulation_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("accumulation-shader"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!(
+                "../shaders/accumulate.wgsl"
+            ))),
+        });
+
+        let accumulation_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("accumulation-bind-layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        let accumulation_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("accumulation-uniform"),
+            size: 16, // vec4<u32>: width, height, accumulated_frames, padded_width
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let accumulation_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("accumulation-bind-group"),
+            layout: &accumulation_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: output_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: accumulation_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: accumulation_uniform_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let accumulation_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("accumulation-pipeline-layout"),
+                bind_group_layouts: &[&accumulation_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        let accumulation_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("accumulation-pipeline"),
+                layout: Some(&accumulation_pipeline_layout),
+                module: &accumulation_shader,
                 entry_point: "main",
             });
 
@@ -428,6 +695,64 @@ impl State {
             multiview: None,
         });
 
+        // Initialize egui
+        let egui_ctx = egui::Context::default();
+        let egui_state = egui_winit::State::new(
+            egui_ctx.clone(),
+            egui::ViewportId::ROOT,
+            &window,
+            Some(window.scale_factor() as f32),
+            None,
+        );
+        let egui_renderer = egui_wgpu::Renderer::new(&device, surface_format, None, 1);
+
+        // Initialize UI state
+        let ui_state = UIState {
+            light_direction: [
+                directional_dir.x as f32,
+                directional_dir.y as f32,
+                directional_dir.z as f32,
+            ],
+            light_intensity: directional_strength as f32,
+            light_color: [
+                directional_color.x as f32,
+                directional_color.y as f32,
+                directional_color.z as f32,
+            ],
+            ambient_intensity: 0.2,
+            ambient_color: [0.1, 0.1, 0.1],
+            samples_per_pixel,
+            max_bounces,
+            mesh_color: [
+                bunny.material.color.x as f32,
+                bunny.material.color.y as f32,
+                bunny.material.color.z as f32,
+            ],
+            objects: vec![
+                SceneObject {
+                    name: "Green Sphere".to_string(),
+                    position: [2.0, 0.0, 5.0],
+                    radius: 1.0,
+                    color: [0.0, 1.0, 0.0],
+                    roughness: 0.5,
+                    enabled: true,
+                },
+                SceneObject {
+                    name: "Blue Sphere".to_string(),
+                    position: [-1.6, 0.0, 5.0],
+                    radius: 1.0,
+                    color: [0.0, 0.0, 1.0],
+                    roughness: 0.5,
+                    enabled: true,
+                },
+            ],
+            show_add_object_dialog: false,
+            new_object_position: [0.0, 0.0, 5.0],
+            new_object_radius: 1.0,
+            new_object_color: [1.0, 1.0, 1.0],
+            show_ui: true,
+        };
+
         let mut state = Self {
             surface,
             device,
@@ -438,11 +763,20 @@ impl State {
             uniform_buffer,
             output_buffer,
             bind_group,
+            bind_group_layout: compute_bind_group_layout,
+            triangle_buffer,
+            sphere_buffer,
+            bunny_mesh: bunny,
             compute_pipeline,
             compute_pipeline_normals,
+            accumulation_pipeline,
+            accumulation_bind_group,
+            accumulation_uniform_buffer,
             display_pipeline,
             display_bind_group,
+            display_bind_group_layout,
             output_texture,
+            sampler,
             camera_position: camera.position,
             camera_yaw: 180.0, // Start looking at +Z (toward the scene)
             camera_pitch: 0.0,
@@ -451,9 +785,17 @@ impl State {
             last_mouse_pos: None,
             mouse_pressed: false,
             use_raytracing: true, // Start with raytracing mode
+            accumulation_buffer,
+            accumulation_texture,
+            accumulated_frames: 0,
+            camera_moved: false,
             frame_count: 0,
-            fps_timer: std::time::Instant::now(),
+            fps_timer: Instant::now(),
             current_fps: 0.0,
+            egui_renderer,
+            egui_state,
+            egui_ctx,
+            ui_state,
         };
 
         // Force initial camera update to sync everything
@@ -473,6 +815,152 @@ impl State {
             self.config.width = new_size.width;
             self.config.height = new_size.height;
             self.surface.configure(&self.device, &self.config);
+
+            // Recreate output buffer and texture with new size
+            // Note: Buffer size must account for row padding (256-byte alignment)
+            let bytes_per_pixel = 16u32; // 4 f32s per pixel
+            let unpadded_bytes_per_row = new_size.width * bytes_per_pixel;
+            let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+            let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
+            let buffer_size = (padded_bytes_per_row * new_size.height) as u64;
+
+            self.output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("output-buffer"),
+                size: buffer_size,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+
+            self.accumulation_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("accumulation-buffer"),
+                size: buffer_size,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+
+            self.output_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("output-texture"),
+                size: wgpu::Extent3d {
+                    width: new_size.width,
+                    height: new_size.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba32Float,
+                usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+
+            self.accumulation_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("accumulation-texture"),
+                size: wgpu::Extent3d {
+                    width: new_size.width,
+                    height: new_size.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba32Float,
+                usage: wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+
+            // Reset accumulation on resize
+            self.accumulated_frames = 0;
+            self.camera_moved = true;
+
+            // Recreate bind groups with new buffers/textures
+            let output_view = self
+                .output_texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
+
+            self.bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("raytracer-bind-group"),
+                layout: &self.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.uniform_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.triangle_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.sphere_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self.output_buffer.as_entire_binding(),
+                    },
+                ],
+            });
+
+            self.display_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("display-bind-group"),
+                layout: &self.display_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&output_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                ],
+            });
+
+            // Recreate accumulation bind group with new buffers
+            self.accumulation_bind_group =
+                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("accumulation-bind-group"),
+                    layout: &self.accumulation_pipeline.get_bind_group_layout(0),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: self.output_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: self.accumulation_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: self.accumulation_uniform_buffer.as_entire_binding(),
+                        },
+                    ],
+                });
+
+            // Update camera aspect ratio with new dimensions
+            self.camera.width = new_size.width as f64;
+            self.camera.height = new_size.height as f64;
+
+            // Recalculate camera frame with new aspect ratio
+            let (lower_left_corner, horizontal, vertical) = camera_frame(&self.camera);
+
+            // Update scene uniform with new dimensions and camera frame
+            self.scene_uniform.resolution[0] = new_size.width;
+            self.scene_uniform.resolution[1] = new_size.height;
+            self.scene_uniform.lower_left_corner = vec3_to_array(lower_left_corner, 0.0);
+            self.scene_uniform.horizontal = vec3_to_array(horizontal, 0.0);
+            self.scene_uniform.vertical = vec3_to_array(vertical, 0.0);
+            // Update padded width for buffer alignment
+            let padded_width_pixels = padded_bytes_per_row / bytes_per_pixel;
+            self.scene_uniform.render_config[2] = padded_width_pixels;
+            self.queue.write_buffer(
+                &self.uniform_buffer,
+                0,
+                bytemuck::bytes_of(&self.scene_uniform),
+            );
         }
     }
 
@@ -518,10 +1006,358 @@ impl State {
         // Clamp pitch to avoid gimbal lock
         self.camera_pitch = self.camera_pitch.clamp(-89.0, 89.0);
 
+        // Mark camera as moved to reset accumulation
+        self.camera_moved = true;
+
         eprintln!(
             "Mouse delta: ({:.2}, {:.2}) -> Yaw: {:.1}°, Pitch: {:.1}°",
             delta_x, delta_y, self.camera_yaw, self.camera_pitch
         );
+    }
+
+    fn update_scene_from_ui(&mut self) {
+        // Update lighting
+        let light_dir = Vec3::new(
+            self.ui_state.light_direction[0] as f64,
+            self.ui_state.light_direction[1] as f64,
+            self.ui_state.light_direction[2] as f64,
+        )
+        .normalize();
+
+        self.scene_uniform.light_direction =
+            vec3_to_array(light_dir, self.ui_state.light_intensity);
+        self.scene_uniform.light_color = [
+            self.ui_state.light_color[0],
+            self.ui_state.light_color[1],
+            self.ui_state.light_color[2],
+            0.0,
+        ];
+        self.scene_uniform.ambient_color = [
+            self.ui_state.ambient_color[0] * self.ui_state.ambient_intensity,
+            self.ui_state.ambient_color[1] * self.ui_state.ambient_intensity,
+            self.ui_state.ambient_color[2] * self.ui_state.ambient_intensity,
+            0.0,
+        ];
+        self.scene_uniform.mesh_color = [
+            self.ui_state.mesh_color[0],
+            self.ui_state.mesh_color[1],
+            self.ui_state.mesh_color[2],
+            1.0,
+        ];
+        self.scene_uniform.render_config[0] = self.ui_state.samples_per_pixel;
+        self.scene_uniform.render_config[1] = self.ui_state.max_bounces;
+        self.scene_uniform.render_config[3] = self.accumulated_frames; // Frame seed for temporal variation
+
+        // Rebuild sphere buffer
+        let spheres: Vec<GpuSphere> = self
+            .ui_state
+            .objects
+            .iter()
+            .filter(|obj| obj.enabled)
+            .map(|obj| GpuSphere {
+                center_radius: [
+                    obj.position[0],
+                    obj.position[1],
+                    obj.position[2],
+                    obj.radius,
+                ],
+                color: [obj.color[0], obj.color[1], obj.color[2], 1.0],
+            })
+            .collect();
+
+        self.scene_uniform.resolution[3] = spheres.len() as u32;
+
+        // Recreate sphere buffer
+        let spheres_data: Cow<[GpuSphere]> = if spheres.is_empty() {
+            Cow::Owned(vec![GpuSphere::zeroed()])
+        } else {
+            Cow::Owned(spheres)
+        };
+
+        self.sphere_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("sphere-buffer"),
+                contents: bytemuck::cast_slice(spheres_data.as_ref()),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+
+        // Recreate bind group
+        self.bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("raytracer-bind-group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.triangle_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.sphere_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.output_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        // Upload uniform buffer
+        self.queue.write_buffer(
+            &self.uniform_buffer,
+            0,
+            bytemuck::bytes_of(&self.scene_uniform),
+        );
+
+        // Reset accumulation when scene changes
+        self.accumulated_frames = 0;
+        self.camera_moved = true;
+    }
+
+    fn padded_bytes_per_row(&self) -> u32 {
+        let bytes_per_pixel = 16u32; // 4 f32 values written per pixel
+        let unpadded = self.size.width.saturating_mul(bytes_per_pixel);
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        unpadded.div_ceil(align) * align
+    }
+
+    fn reset_accumulation_history(&mut self) {
+        let padded_bytes_per_row = self.padded_bytes_per_row();
+        if padded_bytes_per_row == 0 || self.size.height == 0 {
+            self.accumulated_frames = 0;
+            return;
+        }
+
+        let buffer_size = (padded_bytes_per_row as u64 * self.size.height as u64) as usize;
+        let zero_data = vec![0u8; buffer_size];
+        self.queue
+            .write_buffer(&self.accumulation_buffer, 0, &zero_data);
+        self.accumulated_frames = 0;
+    }
+
+    fn build_ui(&mut self) -> egui::FullOutput {
+        let raw_input = self.egui_state.take_egui_input(&self.window);
+        let ui_state = &mut self.ui_state;
+        let current_fps = self.current_fps;
+        let use_raytracing = self.use_raytracing;
+        let mut needs_update = false;
+
+        let full_output = self.egui_ctx.run(raw_input, |ctx| {
+            if ui_state.show_ui {
+                egui::SidePanel::right("scene_editor")
+                    .default_width(320.0)
+                    .resizable(true)
+                    .show(ctx, |ui| {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            ui.heading("Scene Editor");
+                            ui.separator();
+
+                            ui.collapsing("Lighting", |ui| {
+                                ui.label("Directional Light:");
+                                ui.horizontal(|ui| {
+                                    ui.label("Direction:");
+                                    ui.add(
+                                        egui::DragValue::new(&mut ui_state.light_direction[0])
+                                            .speed(0.01),
+                                    );
+                                    ui.add(
+                                        egui::DragValue::new(&mut ui_state.light_direction[1])
+                                            .speed(0.01),
+                                    );
+                                    ui.add(
+                                        egui::DragValue::new(&mut ui_state.light_direction[2])
+                                            .speed(0.01),
+                                    );
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("Intensity:");
+                                    ui.add(egui::Slider::new(
+                                        &mut ui_state.light_intensity,
+                                        0.0..=2.0,
+                                    ));
+                                });
+                                ui.color_edit_button_rgb(&mut ui_state.light_color);
+
+                                ui.add_space(10.0);
+                                ui.label("Ambient Light:");
+                                ui.horizontal(|ui| {
+                                    ui.label("Intensity:");
+                                    ui.add(egui::Slider::new(
+                                        &mut ui_state.ambient_intensity,
+                                        0.0..=1.0,
+                                    ));
+                                });
+                                ui.color_edit_button_rgb(&mut ui_state.ambient_color);
+                            });
+
+                            ui.add_space(10.0);
+                            ui.collapsing("Render Settings", |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label("Samples/pixel:");
+                                    ui.add(egui::Slider::new(
+                                        &mut ui_state.samples_per_pixel,
+                                        1..=16,
+                                    ));
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("Max bounces:");
+                                    ui.add(egui::Slider::new(&mut ui_state.max_bounces, 1..=5));
+                                });
+                            });
+
+                            ui.add_space(10.0);
+                            ui.collapsing("Mesh", |ui| {
+                                ui.label("Bunny Color:");
+                                ui.color_edit_button_rgb(&mut ui_state.mesh_color);
+                            });
+
+                            ui.add_space(10.0);
+                            ui.collapsing("Objects", |ui| {
+                                let mut to_remove = None;
+                                for (idx, obj) in ui_state.objects.iter_mut().enumerate() {
+                                    ui.group(|ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.checkbox(&mut obj.enabled, "");
+                                            ui.label(&obj.name);
+                                            if ui.button("🗑").clicked() {
+                                                to_remove = Some(idx);
+                                            }
+                                        });
+
+                                        if obj.enabled {
+                                            ui.horizontal(|ui| {
+                                                ui.label("Pos:");
+                                                ui.add(
+                                                    egui::DragValue::new(&mut obj.position[0])
+                                                        .speed(0.1)
+                                                        .prefix("X:"),
+                                                );
+                                                ui.add(
+                                                    egui::DragValue::new(&mut obj.position[1])
+                                                        .speed(0.1)
+                                                        .prefix("Y:"),
+                                                );
+                                                ui.add(
+                                                    egui::DragValue::new(&mut obj.position[2])
+                                                        .speed(0.1)
+                                                        .prefix("Z:"),
+                                                );
+                                            });
+                                            ui.horizontal(|ui| {
+                                                ui.label("Radius:");
+                                                ui.add(egui::Slider::new(
+                                                    &mut obj.radius,
+                                                    0.1..=5.0,
+                                                ));
+                                            });
+                                            ui.color_edit_button_rgb(&mut obj.color);
+                                        }
+                                    });
+                                }
+
+                                if let Some(idx) = to_remove {
+                                    ui_state.objects.remove(idx);
+                                    needs_update = true;
+                                }
+
+                                ui.add_space(10.0);
+                                if ui.button("+ Add Sphere").clicked() {
+                                    ui_state.show_add_object_dialog = true;
+                                }
+                            });
+
+                            ui.add_space(10.0);
+                            ui.separator();
+                            if ui.button("Apply Changes").clicked() {
+                                needs_update = true;
+                            }
+                        });
+                    });
+            }
+
+            // Add object dialog as a modal window
+            if ui_state.show_add_object_dialog {
+                egui::Window::new("Add Sphere")
+                    .collapsible(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ctx, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Position:");
+                            ui.add(
+                                egui::DragValue::new(&mut ui_state.new_object_position[0])
+                                    .speed(0.1),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut ui_state.new_object_position[1])
+                                    .speed(0.1),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut ui_state.new_object_position[2])
+                                    .speed(0.1),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Radius:");
+                            ui.add(egui::Slider::new(
+                                &mut ui_state.new_object_radius,
+                                0.1..=5.0,
+                            ));
+                        });
+                        ui.label("Color:");
+                        ui.color_edit_button_rgb(&mut ui_state.new_object_color);
+
+                        ui.horizontal(|ui| {
+                            if ui.button("Add").clicked() {
+                                ui_state.objects.push(SceneObject {
+                                    name: format!("Sphere {}", ui_state.objects.len() + 1),
+                                    position: ui_state.new_object_position,
+                                    radius: ui_state.new_object_radius,
+                                    color: ui_state.new_object_color,
+                                    roughness: 0.5,
+                                    enabled: true,
+                                });
+                                ui_state.show_add_object_dialog = false;
+                                needs_update = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                ui_state.show_add_object_dialog = false;
+                            }
+                        });
+                    });
+            }
+
+            // FPS overlay
+            egui::Area::new(egui::Id::new("fps"))
+                .fixed_pos(egui::pos2(10.0, 10.0))
+                .show(ctx, |ui| {
+                    ui.label(format!("FPS: {:.1}", current_fps));
+                    ui.label(format!(
+                        "Mode: {}",
+                        if use_raytracing {
+                            "Raytracing"
+                        } else {
+                            "Normals"
+                        }
+                    ));
+                    ui.label(format!("Accumulated Frames: {}", self.accumulated_frames));
+                    ui.label("Press TAB to toggle UI");
+                    ui.label("Press SPACE to toggle render mode");
+                });
+        });
+
+        self.egui_state
+            .handle_platform_output(&self.window, full_output.platform_output.clone());
+
+        // Update scene if needed
+        if needs_update {
+            self.update_scene_from_ui();
+        }
+
+        full_output
     }
 
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
@@ -531,7 +1367,7 @@ impl State {
         if elapsed >= 1.0 {
             self.current_fps = self.frame_count as f32 / elapsed;
             self.frame_count = 0;
-            self.fps_timer = std::time::Instant::now();
+            self.fps_timer = Instant::now();
 
             let mode_name = if self.use_raytracing {
                 "Raytracing"
@@ -555,6 +1391,14 @@ impl State {
                 label: Some("render-encoder"),
             });
 
+        // Update frame seed for temporal variation in random sampling
+        self.scene_uniform.render_config[3] = self.accumulated_frames;
+        self.queue.write_buffer(
+            &self.uniform_buffer,
+            0,
+            bytemuck::bytes_of(&self.scene_uniform),
+        );
+
         // Run compute shader (choose pipeline based on mode)
         {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -577,13 +1421,54 @@ impl State {
             cpass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
         }
 
-        // Copy buffer to texture
+        // Temporal accumulation logic
+        let bytes_per_pixel = 16u32; // 4 f32s per pixel
+        let padded_bytes_per_row = self.padded_bytes_per_row();
+
+        if self.camera_moved {
+            // Clear accumulation buffer when camera moves or scene changes
+            self.reset_accumulation_history();
+            self.camera_moved = false;
+        }
+
+        // Run accumulation compute shader to blend current frame with history
+        let padded_width_pixels = padded_bytes_per_row / bytes_per_pixel;
+        let accumulation_uniform_data: [u32; 4] = [
+            self.size.width,
+            self.size.height,
+            self.accumulated_frames,
+            padded_width_pixels,
+        ];
+        self.queue.write_buffer(
+            &self.accumulation_uniform_buffer,
+            0,
+            bytemuck::cast_slice(&accumulation_uniform_data),
+        );
+
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("accumulation-pass"),
+                timestamp_writes: None,
+            });
+
+            cpass.set_pipeline(&self.accumulation_pipeline);
+            cpass.set_bind_group(0, &self.accumulation_bind_group, &[]);
+            let workgroup_size = [8u32, 8u32];
+            let dispatch_x = (self.size.width + workgroup_size[0] - 1).div_ceil(workgroup_size[0]);
+            let dispatch_y = (self.size.height + workgroup_size[1] - 1).div_ceil(workgroup_size[1]);
+            cpass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
+        }
+
+        self.accumulated_frames += 1;
+
+        // Copy accumulated buffer to texture for display
+        // Note: bytes_per_row must be a multiple of 256 (COPY_BYTES_PER_ROW_ALIGNMENT)
         encoder.copy_buffer_to_texture(
             wgpu::ImageCopyBuffer {
-                buffer: &self.output_buffer,
+                buffer: &self.accumulation_buffer,
                 layout: wgpu::ImageDataLayout {
                     offset: 0,
-                    bytes_per_row: Some(self.size.width * 16), // 4 f32s (16 bytes) per pixel
+                    bytes_per_row: Some(padded_bytes_per_row),
                     rows_per_image: None,
                 },
             },
@@ -598,6 +1483,31 @@ impl State {
                 height: self.size.height,
                 depth_or_array_layers: 1,
             },
+        );
+
+        // Build and prepare UI
+        let full_output = self.build_ui();
+        let paint_jobs = self
+            .egui_ctx
+            .tessellate(full_output.shapes, full_output.pixels_per_point);
+        let screen_descriptor = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [self.config.width, self.config.height],
+            pixels_per_point: self.window.scale_factor() as f32,
+        };
+
+        // Update egui textures
+        for (id, image_delta) in &full_output.textures_delta.set {
+            self.egui_renderer
+                .update_texture(&self.device, &self.queue, *id, image_delta);
+        }
+
+        // Update egui buffers
+        self.egui_renderer.update_buffers(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            &paint_jobs,
+            &screen_descriptor,
         );
 
         // Display on screen
@@ -619,6 +1529,15 @@ impl State {
             rpass.set_pipeline(&self.display_pipeline);
             rpass.set_bind_group(0, &self.display_bind_group, &[]);
             rpass.draw(0..6, 0..1);
+
+            // Render egui on top
+            self.egui_renderer
+                .render(&mut rpass, &paint_jobs, &screen_descriptor);
+        }
+
+        // Free egui textures
+        for id in &full_output.textures_delta.free {
+            self.egui_renderer.free_texture(id);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -628,8 +1547,58 @@ impl State {
     }
 }
 
+// Platform-specific entry points
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<()> {
-    let event_loop = EventLoop::new()?;
+    pollster::block_on(run())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    // On WASM, the real entry point is the start() function
+    // This main() is just to satisfy the binary target requirement
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(start)]
+pub fn start() {
+    // Set up panic hook for better error messages in browser console
+    console_error_panic_hook::set_once();
+
+    // Initialize console logging
+    console_log::init_with_level(log::Level::Info).expect("Could not initialize logger");
+
+    log::info!("WASM module loaded, starting application...");
+
+    // Spawn the async runtime
+    wasm_bindgen_futures::spawn_local(async {
+        log::info!("Async runtime started");
+        match run().await {
+            Ok(_) => log::info!("Application exited normally"),
+            Err(e) => {
+                log::error!("Application failed: {:?}", e);
+                // Also try to show in a more visible way
+                web_sys::window().and_then(|w| {
+                    w.alert_with_message(&format!("Failed to start: {:?}", e))
+                        .ok()
+                });
+            }
+        }
+    });
+}
+
+async fn run() -> Result<()> {
+    #[cfg(target_arch = "wasm32")]
+    log::info!("Creating event loop...");
+
+    let event_loop = EventLoop::new().context("Failed to create event loop")?;
+
+    #[cfg(target_arch = "wasm32")]
+    log::info!("Event loop created successfully");
+
+    #[cfg(target_arch = "wasm32")]
+    log::info!("Creating window...");
+
     let window = Arc::new(
         WindowBuilder::new()
             .with_title("GPU Raytracer - Drag mouse to rotate camera")
@@ -638,105 +1607,238 @@ fn main() -> Result<()> {
             .build(&event_loop)?,
     );
 
+    // Attach canvas to DOM for web
+    #[cfg(target_arch = "wasm32")]
+    {
+        use winit::platform::web::WindowExtWebSys;
+
+        if let Some(win) = web_sys::window() {
+            if let Some(doc) = win.document() {
+                if let Some(body) = doc.body() {
+                    if let Some(canvas) = window.canvas() {
+                        let canvas_elem: web_sys::HtmlCanvasElement = canvas;
+
+                        // Style the canvas to fill the viewport
+                        canvas_elem
+                            .set_attribute("style", "width: 100%; height: 100%; display: block;")
+                            .ok();
+
+                        let device_pixel_ratio = win.device_pixel_ratio();
+                        let width = win
+                            .inner_width()
+                            .ok()
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(800.0);
+                        let height = win
+                            .inner_height()
+                            .ok()
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(600.0);
+
+                        // Set canvas pixel size to match the viewport
+                        canvas_elem.set_width((width * device_pixel_ratio).round() as u32);
+                        canvas_elem.set_height((height * device_pixel_ratio).round() as u32);
+
+                        let canvas_node: web_sys::Element = canvas_elem.clone().into();
+                        body.append_child(&canvas_node).ok();
+
+                        // Update winit's logical size so the camera aspect matches the viewport
+                        let _ =
+                            window.request_inner_size(winit::dpi::LogicalSize::new(width, height));
+                    }
+                }
+            }
+        }
+
+        log::info!("Canvas attached to document body and resized to viewport");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     eprintln!("Window created, initializing GPU...");
-    let mut state = pollster::block_on(State::new(window.clone()))?;
-    eprintln!("GPU initialized, starting event loop...");
-    eprintln!("Controls:");
-    eprintln!("  - Click and drag to rotate camera");
-    eprintln!("  - Press SPACE to toggle between raytracing and normals view");
+
+    #[cfg(target_arch = "wasm32")]
+    log::info!("Window created, initializing GPU...");
+
+    #[cfg(target_arch = "wasm32")]
+    log::info!("Calling State::new()...");
+
+    let mut state = State::new(window.clone())
+        .await
+        .context("Failed to create State")?;
+
+    #[cfg(target_arch = "wasm32")]
+    log::info!("State created successfully");
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        eprintln!("GPU initialized, starting event loop...");
+        eprintln!("Controls:");
+        eprintln!("  - Click and drag to rotate camera");
+        eprintln!("  - Press SPACE to toggle between raytracing and normals view");
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        log::info!("GPU initialized, starting event loop...");
+        log::info!("Controls:");
+        log::info!("  - Click and drag to rotate camera");
+        log::info!("  - Press SPACE to toggle between raytracing and normals view");
+    }
+
     state.window.focus_window();
     state.window.request_redraw();
 
-    let mut last_update = std::time::Instant::now();
+    #[cfg(target_arch = "wasm32")]
+    {
+        use winit::platform::web::WindowExtWebSys;
+        if let Some(canvas) = state.window.canvas() {
+            let width = canvas.width().max(1);
+            let height = canvas.height().max(1);
+            state.resize(winit::dpi::PhysicalSize::new(width, height));
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    let mut last_update = Instant::now();
+
+    #[cfg(target_arch = "wasm32")]
+    let mut last_update = web_time::Instant::now();
 
     event_loop.run(move |event, target| {
         match event {
             Event::WindowEvent {
                 ref event,
                 window_id,
-            } if window_id == state.window.id() => match event {
-                WindowEvent::CloseRequested => target.exit(),
-                WindowEvent::Resized(physical_size) => {
-                    state.resize(*physical_size);
+            } if window_id == state.window.id() => {
+                // Let egui handle the event first
+                let event_response = state.egui_state.on_window_event(&state.window, event);
+
+                // Skip input handling if egui consumed the event
+                if event_response.consumed {
+                    state.window.request_redraw();
+                    return;
                 }
-                WindowEvent::KeyboardInput {
-                    event: key_event, ..
-                } => {
-                    if key_event.state == ElementState::Pressed {
-                        if let winit::keyboard::PhysicalKey::Code(keycode) = key_event.physical_key
-                        {
-                            if keycode == winit::keyboard::KeyCode::Space {
-                                state.use_raytracing = !state.use_raytracing;
-                                let mode = if state.use_raytracing {
-                                    "Raytracing"
+
+                match event {
+                    WindowEvent::CloseRequested => target.exit(),
+                    WindowEvent::Resized(physical_size) => {
+                        state.resize(*physical_size);
+                    }
+                    WindowEvent::KeyboardInput {
+                        event: key_event, ..
+                    } =>
+                    {
+                        #[allow(clippy::collapsible_if)]
+                        if key_event.state == ElementState::Pressed {
+                            if let winit::keyboard::PhysicalKey::Code(keycode) =
+                                key_event.physical_key
+                            {
+                                match keycode {
+                                    winit::keyboard::KeyCode::Space => {
+                                        state.use_raytracing = !state.use_raytracing;
+                                        state.accumulated_frames = 0;
+                                        state.scene_uniform.render_config[3] = 0;
+                                        state.camera_moved = true;
+                                        let mode = if state.use_raytracing {
+                                            "Raytracing"
+                                        } else {
+                                            "Normals"
+                                        };
+                                        #[cfg(not(target_arch = "wasm32"))]
+                                        eprintln!("Switched to {} mode", mode);
+                                        #[cfg(target_arch = "wasm32")]
+                                        log::info!("Switched to {} mode", mode);
+                                    }
+                                    winit::keyboard::KeyCode::Tab => {
+                                        state.ui_state.show_ui = !state.ui_state.show_ui;
+                                        let ui_status = if state.ui_state.show_ui {
+                                            "shown"
+                                        } else {
+                                            "hidden"
+                                        };
+                                        #[cfg(not(target_arch = "wasm32"))]
+                                        eprintln!("UI: {}", ui_status);
+                                        #[cfg(target_arch = "wasm32")]
+                                        log::info!("UI: {}", ui_status);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    WindowEvent::MouseInput {
+                        state: button_state,
+                        button,
+                        ..
+                    } => {
+                        if *button == winit::event::MouseButton::Left {
+                            state.mouse_pressed = *button_state == ElementState::Pressed;
+                            #[cfg(not(target_arch = "wasm32"))]
+                            eprintln!(
+                                "Mouse button: {}",
+                                if state.mouse_pressed {
+                                    "PRESSED"
                                 } else {
-                                    "Normals"
-                                };
-                                eprintln!("Switched to {} mode", mode);
+                                    "RELEASED"
+                                }
+                            );
+                            if !state.mouse_pressed {
+                                state.last_mouse_pos = None;
                             }
                         }
                     }
-                }
-                WindowEvent::MouseInput {
-                    state: button_state,
-                    button,
-                    ..
-                } => {
-                    if *button == winit::event::MouseButton::Left {
-                        state.mouse_pressed = *button_state == ElementState::Pressed;
-                        eprintln!(
-                            "Mouse button: {}",
-                            if state.mouse_pressed {
-                                "PRESSED"
-                            } else {
-                                "RELEASED"
+                    WindowEvent::CursorMoved { position, .. } => {
+                        let current_pos = (position.x, position.y);
+
+                        if state.mouse_pressed {
+                            if let Some(last_pos) = state.last_mouse_pos {
+                                let delta_x = current_pos.0 - last_pos.0;
+                                let delta_y = current_pos.1 - last_pos.1;
+                                state.handle_mouse_motion(delta_x, delta_y);
                             }
-                        );
-                        if !state.mouse_pressed {
-                            state.last_mouse_pos = None;
+                        }
+
+                        state.last_mouse_pos = Some(current_pos);
+                    }
+                    WindowEvent::RedrawRequested => {
+                        // Update camera based on elapsed time
+                        #[cfg(not(target_arch = "wasm32"))]
+                        let now = Instant::now();
+                        #[cfg(target_arch = "wasm32")]
+                        let now = web_time::Instant::now();
+
+                        let delta_time = (now - last_update).as_secs_f64();
+                        last_update = now;
+
+                        state.update_camera(delta_time);
+
+                        match state.render() {
+                            Ok(_) => {}
+                            Err(wgpu::SurfaceError::Lost) => {
+                                #[cfg(not(target_arch = "wasm32"))]
+                                eprintln!("Surface lost, resizing...");
+                                #[cfg(target_arch = "wasm32")]
+                                log::warn!("Surface lost, resizing...");
+                                state.resize(state.size);
+                            }
+                            Err(wgpu::SurfaceError::OutOfMemory) => {
+                                #[cfg(not(target_arch = "wasm32"))]
+                                eprintln!("Out of memory!");
+                                #[cfg(target_arch = "wasm32")]
+                                log::error!("Out of memory!");
+                                target.exit();
+                            }
+                            Err(e) => {
+                                #[cfg(not(target_arch = "wasm32"))]
+                                eprintln!("Render error: {:?}", e);
+                                #[cfg(target_arch = "wasm32")]
+                                log::error!("Render error: {:?}", e);
+                            }
                         }
                     }
+                    _ => {}
                 }
-                WindowEvent::CursorMoved { position, .. } => {
-                    let current_pos = (position.x, position.y);
-
-                    if state.mouse_pressed {
-                        if let Some(last_pos) = state.last_mouse_pos {
-                            let delta_x = current_pos.0 - last_pos.0;
-                            let delta_y = current_pos.1 - last_pos.1;
-                            state.handle_mouse_motion(delta_x, delta_y);
-                        } else {
-                            eprintln!("Mouse pressed but no last position");
-                        }
-                    }
-
-                    state.last_mouse_pos = Some(current_pos);
-                }
-                WindowEvent::RedrawRequested => {
-                    // Update camera based on elapsed time
-                    let now = std::time::Instant::now();
-                    let delta_time = (now - last_update).as_secs_f64();
-                    last_update = now;
-
-                    state.update_camera(delta_time);
-
-                    match state.render() {
-                        Ok(_) => {}
-                        Err(wgpu::SurfaceError::Lost) => {
-                            eprintln!("Surface lost, resizing...");
-                            state.resize(state.size);
-                        }
-                        Err(wgpu::SurfaceError::OutOfMemory) => {
-                            eprintln!("Out of memory!");
-                            target.exit();
-                        }
-                        Err(e) => {
-                            eprintln!("Render error: {:?}", e);
-                        }
-                    }
-                }
-                _ => {}
-            },
+            }
             Event::AboutToWait => {
                 state.window.request_redraw();
             }

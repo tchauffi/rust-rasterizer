@@ -53,8 +53,8 @@ fn hash_float3(value: vec3<u32>) -> f32 {
     return fract(sin(dot_product) * 43758.5453);
 }
 
-fn random2(pixel: vec2<u32>, sample: u32) -> vec2<f32> {
-    let seed0 = vec3<u32>(pixel.x, pixel.y, sample);
+fn random2(pixel: vec2<u32>, sample: u32, frame_seed: u32) -> vec2<f32> {
+    let seed0 = vec3<u32>(pixel.x, pixel.y, sample + frame_seed * 1000u);
     let seed1 = seed0 + vec3<u32>(17u, 59u, 83u);
     return vec2<f32>(hash_float3(seed0), hash_float3(seed1));
 }
@@ -214,16 +214,18 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let width = scene.resolution.x;
     let height = scene.resolution.y;
-    let pixel_index = global_id.y * width + global_id.x;
+    let padded_width = scene.render_config.z; // Padded width for buffer alignment
+    let pixel_index = global_id.y * padded_width + global_id.x;
 
     let samples = max(scene.render_config.x, 1u);
     let max_bounces = max(scene.render_config.y, 1u);
+    let frame_seed = scene.render_config.w; // Frame counter for temporal variation
     let origin = scene.camera_position.xyz;
     let pixel_coords = vec2<u32>(global_id.x, global_id.y);
     var color_accum = vec3<f32>(0.0);
 
     for (var sample: u32 = 0u; sample < samples; sample = sample + 1u) {
-        let jitter = random2(pixel_coords, sample);
+        let jitter = random2(pixel_coords, sample, frame_seed);
         let u = (f32(global_id.x) + jitter.x) / f32(width);
         let v = (f32(global_id.y) + jitter.y) / f32(height);
 
@@ -252,7 +254,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             let bounce_seed = vec3<u32>(
                 pixel_coords.x + 17u * bounce + 13u * sample,
                 pixel_coords.y + 31u * bounce + 7u * sample,
-                sample * max_bounces + bounce,
+                sample * max_bounces + bounce + frame_seed * 1000u,
             );
             ray_origin = hit_pos + hit.normal * 1e-3;
             ray_dir = random_in_hemisphere(hit.normal, bounce_seed);
