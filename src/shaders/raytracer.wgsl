@@ -380,8 +380,8 @@ fn evaluate_direct(
     let ambient = scene.ambient_color.xyz;
     let light_color = scene.light_color.xyz;
 
-    // Diffuse contribution (reduced for metallic surfaces)
-    let diffuse_contribution = mix(1.0, 0.0, metallic);
+    // Diffuse contribution (almost zero for metallic surfaces)
+    let diffuse_contribution = mix(1.0, 0.05, metallic);
     let diffuse_lighting = ambient + light_color * diffuse * diffuse_contribution;
     var result = albedo * diffuse_lighting;
 
@@ -393,14 +393,15 @@ fn evaluate_direct(
         // Convert roughness to shininess (inverse relationship)
         // Roughness 0.0 = very shiny (high shininess ~256)
         // Roughness 1.0 = very rough (low shininess ~4)
-        let shininess = mix(256.0, 4.0, roughness);
+        let shininess = mix(512.0, 8.0, roughness);
         let spec_strength = pow(spec_angle, shininess);
 
         // Metallic surfaces have colored specular, plastic/dielectric have white specular
         let specular_color = mix(vec3<f32>(1.0), albedo, metallic);
 
-        // Specular intensity: reduce based on roughness for realism
-        let specular_intensity = mix(0.5, 1.0, 1.0 - roughness);
+        // Specular intensity: much brighter for metallic surfaces
+        let base_intensity = mix(0.5, 3.0, metallic);
+        let specular_intensity = base_intensity * (1.0 - roughness * 0.5);
         let specular = specular_color * spec_strength * light_strength * specular_intensity;
 
         result = result + light_color * specular;
@@ -455,10 +456,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
             // Evaluate direct lighting (includes diffuse and specular)
             let direct = evaluate_direct(hit_pos, hit.normal, hit.color, view_dir, hit.roughness, hit.metallic);
-            radiance = radiance + throughput * direct;
 
-            // Metallic surfaces absorb less indirect light
-            let attenuation = mix(INDIRECT_ATTENUATION, 0.8, hit.metallic);
+            // For metals on first bounce, reduce direct lighting contribution and rely more on reflections
+            let direct_weight = mix(1.0, 0.3, hit.metallic);
+            radiance = radiance + throughput * direct * direct_weight;
+
+            // Metallic surfaces keep much more energy for reflections
+            let attenuation = mix(INDIRECT_ATTENUATION, 0.95, hit.metallic);
             throughput = throughput * hit.color * attenuation;
 
             let bounce_seed = vec3<u32>(
