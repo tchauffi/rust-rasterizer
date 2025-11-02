@@ -147,8 +147,11 @@ fn sky_color(ray_dir: vec3<f32>) -> vec3<f32> {
     // Sample the environment map using the sampler (this handles filtering properly)
     let env_color = textureSampleLevel(environment_map, environment_sampler, uv, 0.0);
 
-    // Return the environment color (exposure already applied during texture loading)
-    return env_color.rgb;
+    // Apply environment strength (stored in ambient_color.w)
+    let environment_strength = scene.ambient_color.w;
+
+    // Return the environment color scaled by strength (exposure already applied during texture loading)
+    return env_color.rgb * environment_strength;
 }
 
 fn intersect_triangle(origin: vec3<f32>, dir: vec3<f32>, tri: Triangle) -> HitInfo {

@@ -43,6 +43,7 @@ struct UIState {
     // Environment controls
     environment_maps: Vec<String>,
     selected_environment: usize,
+    environment_strength: f32,
 
     // Lighting controls
     light_direction: [f32; 3],
@@ -713,7 +714,7 @@ impl State {
             vertical: vec3_to_array(vertical, 0.0),
             light_direction: vec3_to_array(directional_dir, directional_strength as f32),
             light_color: vec3_to_array(directional_color, 0.0),
-            ambient_color: vec3_to_array(ambient_color, 0.0),
+            ambient_color: vec3_to_array(ambient_color, 1.0), // w: environment_strength
             mesh_color: vec3_to_array(bunny.material.color, 1.0),
             render_config: [samples_per_pixel, max_bounces, padded_width, 0],
             accel_info: [bvh_node_count, 0, 0, 0],
@@ -1264,6 +1265,7 @@ impl State {
         let ui_state = UIState {
             environment_maps: available_env_maps.clone(),
             selected_environment,
+            environment_strength: 1.0,
             light_direction: [
                 directional_dir.x as f32,
                 directional_dir.y as f32,
@@ -1629,7 +1631,7 @@ impl State {
             self.ui_state.ambient_color[0] * self.ui_state.ambient_intensity,
             self.ui_state.ambient_color[1] * self.ui_state.ambient_intensity,
             self.ui_state.ambient_color[2] * self.ui_state.ambient_intensity,
-            0.0,
+            self.ui_state.environment_strength,
         ];
         self.scene_uniform.mesh_color = [
             self.ui_state.mesh_color[0],
@@ -1836,6 +1838,16 @@ impl State {
                                         requested_environment =
                                             ui_state.environment_maps.get(ui_state.selected_environment).cloned();
                                     }
+                                }
+
+                                ui.add_space(10.0);
+
+                                ui.label("Environment Strength:");
+                                if ui
+                                    .add(egui::Slider::new(&mut ui_state.environment_strength, 0.0..=5.0))
+                                    .changed()
+                                {
+                                    needs_update = true;
                                 }
 
                                 ui.add_space(10.0);
