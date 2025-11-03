@@ -1,9 +1,17 @@
-# rust-rasterizer
-A rasterizer implementation in Rust
+# rust-raytracer
+A raytracer implementation in Rust
 
 ![Example](doc/bunny_rotated.png)
 
 Try it online: [Live WebGPU Raytracer](https://tchauffi.github.io/rust-rasterizer/)
+
+Web version built with [trunk](https://trunkrs.dev/) and deployed on GitHub Pages. It is 15%-20% slower than native due to WASM overhead.
+
+To use a compiled version locally, clone the repo and run:
+
+```bash
+cargo run --bin live_raytracer --release
+```
 
 ## Features
 
