@@ -97,7 +97,7 @@ async fn run() -> Result<()> {
         vertical: vec3_to_array(vertical, 0.0),
         light_direction: vec3_to_array(directional_dir, directional_strength as f32),
         light_color: vec3_to_array(directional_color, 0.0),
-        ambient_color: vec3_to_array(ambient_color, 0.0),
+        ambient_color: vec3_to_array(ambient_color, 1.0), // w: environment_strength
         mesh_color: vec3_to_array(bunny.material.color, 1.0),
         render_config: [samples_per_pixel, max_bounces, padded_width, 0],
         accel_info: [bvh_node_count, 0, 0, 0],

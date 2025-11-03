@@ -45,13 +45,6 @@ struct UIState {
     selected_environment: usize,
     environment_strength: f32,
 
-    // Lighting controls
-    light_direction: [f32; 3],
-    light_intensity: f32,
-    light_color: [f32; 3],
-    ambient_intensity: f32,
-    ambient_color: [f32; 3],
-
     // Render settings
     samples_per_pixel: u32,
     max_bounces: u32,
@@ -1266,19 +1259,6 @@ impl State {
             environment_maps: available_env_maps.clone(),
             selected_environment,
             environment_strength: 1.0,
-            light_direction: [
-                directional_dir.x as f32,
-                directional_dir.y as f32,
-                directional_dir.z as f32,
-            ],
-            light_intensity: directional_strength as f32,
-            light_color: [
-                directional_color.x as f32,
-                directional_color.y as f32,
-                directional_color.z as f32,
-            ],
-            ambient_intensity: 0.2,
-            ambient_color: [0.1, 0.1, 0.1],
             samples_per_pixel,
             max_bounces,
             mesh_color: [
@@ -1611,26 +1591,18 @@ impl State {
     }
 
     fn update_scene_from_ui(&mut self) {
-        // Update lighting
-        let light_dir = Vec3::new(
-            self.ui_state.light_direction[0] as f64,
-            self.ui_state.light_direction[1] as f64,
-            self.ui_state.light_direction[2] as f64,
-        )
-        .normalize();
+        // Set reasonable default lighting values (not exposed in UI but available for future use)
+        let default_light_dir = Vec3::new(3.0, -3.0, 3.0).normalize();
+        let default_light_strength = 0.8_f32;
+        let default_light_color = Vec3::new(1.0, 1.0, 1.0);
+        let default_ambient = Vec3::new(0.1, 0.1, 0.1) * 0.2;
 
-        self.scene_uniform.light_direction =
-            vec3_to_array(light_dir, self.ui_state.light_intensity);
-        self.scene_uniform.light_color = [
-            self.ui_state.light_color[0],
-            self.ui_state.light_color[1],
-            self.ui_state.light_color[2],
-            0.0,
-        ];
+        self.scene_uniform.light_direction = vec3_to_array(default_light_dir, default_light_strength);
+        self.scene_uniform.light_color = vec3_to_array(default_light_color, 0.0);
         self.scene_uniform.ambient_color = [
-            self.ui_state.ambient_color[0] * self.ui_state.ambient_intensity,
-            self.ui_state.ambient_color[1] * self.ui_state.ambient_intensity,
-            self.ui_state.ambient_color[2] * self.ui_state.ambient_intensity,
+            default_ambient.x as f32,
+            default_ambient.y as f32,
+            default_ambient.z as f32,
             self.ui_state.environment_strength,
         ];
         self.scene_uniform.mesh_color = [
@@ -1879,96 +1851,93 @@ impl State {
                             });
 
                             ui.add_space(10.0);
-                            ui.collapsing("Additional Lights", |ui| {
-                                ui.label("Directional Light (legacy):");
-                                ui.horizontal(|ui| {
-                                    ui.label("Direction:");
-                                    ui.add(
-                                        egui::DragValue::new(&mut ui_state.light_direction[0])
-                                            .speed(0.01),
-                                    );
-                                    ui.add(
-                                        egui::DragValue::new(&mut ui_state.light_direction[1])
-                                            .speed(0.01),
-                                    );
-                                    ui.add(
-                                        egui::DragValue::new(&mut ui_state.light_direction[2])
-                                            .speed(0.01),
-                                    );
-                                });
-                                ui.horizontal(|ui| {
-                                    ui.label("Intensity:");
-                                    ui.add(
-                                        egui::Slider::new(&mut ui_state.light_intensity, 0.0..=2.0),
-                                    );
-                                });
-                                ui.color_edit_button_rgb(&mut ui_state.light_color);
-
-                                ui.add_space(10.0);
-                                ui.label("Ambient Light:");
-                                ui.horizontal(|ui| {
-                                    ui.label("Intensity:");
-                                    ui.add(
-                                        egui::Slider::new(&mut ui_state.ambient_intensity, 0.0..=1.0),
-                                    );
-                                });
-                                ui.color_edit_button_rgb(&mut ui_state.ambient_color);
-                            });
-
-                            ui.add_space(10.0);
                             ui.collapsing("Render Settings", |ui| {
                                 ui.horizontal(|ui| {
                                     ui.label("Samples/pixel:");
-                                    ui.add(egui::Slider::new(
-                                        &mut ui_state.samples_per_pixel,
-                                        1..=16,
-                                    ));
+                                    if ui
+                                        .add(egui::Slider::new(
+                                            &mut ui_state.samples_per_pixel,
+                                            1..=16,
+                                        ))
+                                        .changed()
+                                    {
+                                        needs_update = true;
+                                    }
                                 });
                                 ui.horizontal(|ui| {
                                     ui.label("Max bounces:");
-                                    ui.add(egui::Slider::new(&mut ui_state.max_bounces, 1..=5));
+                                    if ui.add(egui::Slider::new(&mut ui_state.max_bounces, 1..=5)).changed() {
+                                        needs_update = true;
+                                    }
                                 });
                             });
 
                             ui.add_space(10.0);
                             ui.collapsing("Mesh", |ui| {
                                 ui.label("Bunny Color:");
-                                ui.color_edit_button_rgb(&mut ui_state.mesh_color);
+                                if ui.color_edit_button_rgb(&mut ui_state.mesh_color).changed() {
+                                    needs_update = true;
+                                }
 
                                 ui.add_space(5.0);
                                 ui.horizontal(|ui| {
                                     ui.label("Position:");
-                                    ui.add(
-                                        egui::DragValue::new(&mut ui_state.mesh_position[0])
-                                            .speed(0.1)
-                                            .prefix("X:"),
-                                    );
-                                    ui.add(
-                                        egui::DragValue::new(&mut ui_state.mesh_position[1])
-                                            .speed(0.1)
-                                            .prefix("Y:"),
-                                    );
-                                    ui.add(
-                                        egui::DragValue::new(&mut ui_state.mesh_position[2])
-                                            .speed(0.1)
-                                            .prefix("Z:"),
-                                    );
+                                    if ui
+                                        .add(
+                                            egui::DragValue::new(&mut ui_state.mesh_position[0])
+                                                .speed(0.1)
+                                                .prefix("X:"),
+                                        )
+                                        .changed()
+                                    {
+                                        needs_update = true;
+                                    }
+                                    if ui
+                                        .add(
+                                            egui::DragValue::new(&mut ui_state.mesh_position[1])
+                                                .speed(0.1)
+                                                .prefix("Y:"),
+                                        )
+                                        .changed()
+                                    {
+                                        needs_update = true;
+                                    }
+                                    if ui
+                                        .add(
+                                            egui::DragValue::new(&mut ui_state.mesh_position[2])
+                                                .speed(0.1)
+                                                .prefix("Z:"),
+                                        )
+                                        .changed()
+                                    {
+                                        needs_update = true;
+                                    }
                                 });
 
                                 ui.horizontal(|ui| {
                                     ui.label("Roughness:");
-                                    ui.add(egui::Slider::new(
-                                        &mut ui_state.mesh_roughness,
-                                        0.0..=1.0,
-                                    ));
+                                    if ui
+                                        .add(egui::Slider::new(
+                                            &mut ui_state.mesh_roughness,
+                                            0.0..=1.0,
+                                        ))
+                                        .changed()
+                                    {
+                                        needs_update = true;
+                                    }
                                 });
 
                                 ui.horizontal(|ui| {
                                     ui.label("Metallic:");
-                                    ui.add(egui::Slider::new(
-                                        &mut ui_state.mesh_metallic,
-                                        0.0..=1.0,
-                                    ));
+                                    if ui
+                                        .add(egui::Slider::new(
+                                            &mut ui_state.mesh_metallic,
+                                            0.0..=1.0,
+                                        ))
+                                        .changed()
+                                    {
+                                        needs_update = true;
+                                    }
                                 });
                             });
 
@@ -1978,7 +1947,9 @@ impl State {
                                 for (idx, obj) in ui_state.objects.iter_mut().enumerate() {
                                     ui.group(|ui| {
                                         ui.horizontal(|ui| {
-                                            ui.checkbox(&mut obj.enabled, "");
+                                            if ui.checkbox(&mut obj.enabled, "").changed() {
+                                                needs_update = true;
+                                            }
                                             ui.label(&obj.name);
                                             if ui.button("🗑").clicked() {
                                                 to_remove = Some(idx);
@@ -1988,28 +1959,48 @@ impl State {
                                         if obj.enabled {
                                             ui.horizontal(|ui| {
                                                 ui.label("Pos:");
-                                                ui.add(
-                                                    egui::DragValue::new(&mut obj.position[0])
-                                                        .speed(0.1)
-                                                        .prefix("X:"),
-                                                );
-                                                ui.add(
-                                                    egui::DragValue::new(&mut obj.position[1])
-                                                        .speed(0.1)
-                                                        .prefix("Y:"),
-                                                );
-                                                ui.add(
-                                                    egui::DragValue::new(&mut obj.position[2])
-                                                        .speed(0.1)
-                                                        .prefix("Z:"),
-                                                );
+                                                if ui
+                                                    .add(
+                                                        egui::DragValue::new(&mut obj.position[0])
+                                                            .speed(0.1)
+                                                            .prefix("X:"),
+                                                    )
+                                                    .changed()
+                                                {
+                                                    needs_update = true;
+                                                }
+                                                if ui
+                                                    .add(
+                                                        egui::DragValue::new(&mut obj.position[1])
+                                                            .speed(0.1)
+                                                            .prefix("Y:"),
+                                                    )
+                                                    .changed()
+                                                {
+                                                    needs_update = true;
+                                                }
+                                                if ui
+                                                    .add(
+                                                        egui::DragValue::new(&mut obj.position[2])
+                                                            .speed(0.1)
+                                                            .prefix("Z:"),
+                                                    )
+                                                    .changed()
+                                                {
+                                                    needs_update = true;
+                                                }
                                             });
                                             ui.horizontal(|ui| {
                                                 ui.label("Radius:");
-                                                ui.add(egui::Slider::new(
-                                                    &mut obj.radius,
-                                                    0.1..=5.0,
-                                                ));
+                                                if ui
+                                                    .add(egui::Slider::new(
+                                                        &mut obj.radius,
+                                                        0.1..=5.0,
+                                                    ))
+                                                    .changed()
+                                                {
+                                                    needs_update = true;
+                                                }
                                             });
                                             ui.horizontal(|ui| {
                                                 ui.label("Roughness:");
@@ -2035,7 +2026,9 @@ impl State {
                                                     needs_update = true;
                                                 }
                                             });
-                                            ui.color_edit_button_rgb(&mut obj.color);
+                                            if ui.color_edit_button_rgb(&mut obj.color).changed() {
+                                                needs_update = true;
+                                            }
                                         }
                                     });
                                 }
@@ -2050,12 +2043,6 @@ impl State {
                                     ui_state.show_add_object_dialog = true;
                                 }
                             });
-
-                            ui.add_space(10.0);
-                            ui.separator();
-                            if ui.button("Apply Changes").clicked() {
-                                needs_update = true;
-                            }
                         });
                     });
             }
