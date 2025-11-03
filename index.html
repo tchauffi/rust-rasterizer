@@ -132,18 +132,44 @@
     <link data-trunk rel="copy-dir" href="data"/>
 
     <script>
-        // Hide loading spinner after a delay or when WASM is ready
+        // Hide loading spinner when canvas appears
+        function hideLoadingWhenCanvasReady() {
+            const canvas = document.querySelector('canvas');
+            if (canvas) {
+                document.getElementById('loading').classList.add('hidden');
+                console.log('Canvas found, hiding loading screen');
+                return true;
+            }
+            return false;
+        }
+
+        // Try to hide loading when page loads
         window.addEventListener('load', () => {
-            // Give WASM a moment to initialize
-            setTimeout(() => {
-                const canvas = document.querySelector('canvas');
-                if (canvas) {
-                    document.getElementById('loading').classList.add('hidden');
-                    console.log('Canvas found, hiding loading screen');
-                } else {
-                    console.warn('No canvas found after load');
+            // Check immediately
+            if (hideLoadingWhenCanvasReady()) {
+                return;
+            }
+
+            // If canvas not ready, observe DOM for canvas to be added
+            const observer = new MutationObserver((mutations) => {
+                if (hideLoadingWhenCanvasReady()) {
+                    observer.disconnect();
                 }
-            }, 1000);
+            });
+
+            observer.observe(document.body, {
+                childList: true,
+                subtree: true
+            });
+
+            // Fallback: if canvas still not found after 10 seconds, hide loader anyway
+            setTimeout(() => {
+                if (!document.querySelector('canvas')) {
+                    console.warn('Canvas still not found after 10 seconds, hiding loader anyway');
+                    document.getElementById('loading').classList.add('hidden');
+                }
+                observer.disconnect();
+            }, 10000);
         });
 
         // Catch any errors
