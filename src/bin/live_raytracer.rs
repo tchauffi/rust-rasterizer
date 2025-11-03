@@ -6,6 +6,9 @@ use anyhow::{Context, Result, anyhow};
 use bytemuck::Zeroable;
 use rust_raytracer::camera::Camera;
 
+// Material constants
+const METALLIC_THRESHOLD: f32 = 0.5;
+
 #[cfg(not(target_arch = "wasm32"))]
 use std::fs;
 #[cfg(not(target_arch = "wasm32"))]
@@ -703,7 +706,7 @@ impl State {
         let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
         let padded_width = padded_bytes_per_row / bytes_per_pixel;
 
-        let mesh_material_type = if bunny.material.metallic > 0.5 { 1.0 } else { 0.0 };
+        let mesh_material_type = if bunny.material.metallic as f32 > METALLIC_THRESHOLD { 1.0 } else { 0.0 };
         let scene_uniform = SceneUniform {
             resolution: [width, height, triangle_count, sphere_count],
             camera_position: vec3_to_array(camera.position, 0.0),
@@ -1580,6 +1583,10 @@ impl State {
         );
     }
 
+    fn position_changed(pos1: &[f32; 3], pos2: &[f32; 3]) -> bool {
+        pos1[0] != pos2[0] || pos1[1] != pos2[1] || pos1[2] != pos2[2]
+    }
+
     fn handle_mouse_motion(&mut self, delta_x: f64, delta_y: f64) {
         let sensitivity = 0.2;
         self.camera_yaw -= delta_x * sensitivity; // Fixed: inverted
@@ -1618,7 +1625,7 @@ impl State {
             self.ui_state.mesh_color[2],
             1.0,
         ];
-        let mesh_material_type = if self.ui_state.mesh_metallic > 0.5 { 1.0 } else { 0.0 };
+        let mesh_material_type = if self.ui_state.mesh_metallic > METALLIC_THRESHOLD { 1.0 } else { 0.0 };
         self.scene_uniform.mesh_material = [
             self.ui_state.mesh_roughness,
             self.ui_state.mesh_metallic,
@@ -1632,9 +1639,7 @@ impl State {
             || self.bunny_mesh.material.color.z != self.ui_state.mesh_color[2] as f64
             || self.bunny_mesh.material.roughness != self.ui_state.mesh_roughness as f64
             || self.bunny_mesh.material.metallic != self.ui_state.mesh_metallic as f64
-            || self.ui_state.last_applied_mesh_position[0] != self.ui_state.mesh_position[0]
-            || self.ui_state.last_applied_mesh_position[1] != self.ui_state.mesh_position[1]
-            || self.ui_state.last_applied_mesh_position[2] != self.ui_state.mesh_position[2];
+            || Self::position_changed(&self.ui_state.last_applied_mesh_position, &self.ui_state.mesh_position);
 
         // Only rebuild mesh if properties changed
         if mesh_changed {

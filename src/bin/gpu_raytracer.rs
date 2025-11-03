@@ -11,6 +11,9 @@ use rust_raytracer::sphere::Sphere;
 use rust_raytracer::vec3::Vec3;
 use wgpu::util::DeviceExt;
 
+// Material constants
+const METALLIC_THRESHOLD: f32 = 0.5;
+
 fn main() -> Result<()> {
     pollster::block_on(run())
 }
@@ -89,7 +92,7 @@ async fn run() -> Result<()> {
     // Storage buffer is laid out in tightly packed rows, so padded width just equals image width.
     let padded_width = width;
 
-    let mesh_material_type = if bunny.material.metallic > 0.5 { 1.0 } else { 0.0 };
+    let mesh_material_type = if bunny.material.metallic as f32 > METALLIC_THRESHOLD { 1.0 } else { 0.0 };
     let scene_uniform = SceneUniform {
         resolution: [width, height, triangle_count, sphere_count],
         camera_position: vec3_to_array(camera.position, 0.0),
