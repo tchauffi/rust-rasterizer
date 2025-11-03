@@ -151,8 +151,10 @@
             }
 
             // If canvas not ready, observe DOM for canvas to be added
+            let observerActive = true;
             const observer = new MutationObserver((mutations) => {
                 if (hideLoadingWhenCanvasReady()) {
+                    observerActive = false;
                     observer.disconnect();
                 }
             });
@@ -164,11 +166,14 @@
 
             // Fallback: if canvas still not found after 10 seconds, hide loader anyway
             setTimeout(() => {
-                if (!document.querySelector('canvas')) {
-                    console.warn('Canvas still not found after 10 seconds, hiding loader anyway');
-                    document.getElementById('loading').classList.add('hidden');
+                if (observerActive) {
+                    if (!document.querySelector('canvas')) {
+                        console.warn('Canvas still not found after 10 seconds, hiding loader anyway');
+                        document.getElementById('loading').classList.add('hidden');
+                    }
+                    observerActive = false;
+                    observer.disconnect();
                 }
-                observer.disconnect();
             }, 10000);
         });
 
