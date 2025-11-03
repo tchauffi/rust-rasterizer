@@ -685,6 +685,10 @@ impl State {
 
         let (lower_left_corner, horizontal, vertical) = camera_frame(&camera);
 
+        let directional_dir = Vec3::new(3.0, -3.0, 3.0).normalize();
+        let directional_strength = 0.8_f64;
+        let directional_color = Vec3::new(1.0, 1.0, 1.0);
+        let ambient_color = Vec3::new(0.1, 0.1, 0.1) * 0.2;
         let samples_per_pixel = 1u32; // 1 sample for real-time interactivity
         let max_bounces = 2u32; // Reduced bounces for speed
 
@@ -701,7 +705,9 @@ impl State {
             lower_left_corner: vec3_to_array(lower_left_corner, 0.0),
             horizontal: vec3_to_array(horizontal, 0.0),
             vertical: vec3_to_array(vertical, 0.0),
-            environment_strength: [1.0, 0.0, 0.0, 0.0], // x: environment strength, yzw: padding
+            light_direction: vec3_to_array(directional_dir, directional_strength as f32),
+            light_color: vec3_to_array(directional_color, 0.0),
+            ambient_color: vec3_to_array(ambient_color, 1.0), // w: environment_strength
             mesh_color: vec3_to_array(bunny.material.color, 1.0),
             render_config: [samples_per_pixel, max_bounces, padded_width, 0],
             accel_info: [bvh_node_count, 0, 0, 0],
@@ -1585,12 +1591,19 @@ impl State {
     }
 
     fn update_scene_from_ui(&mut self) {
-        // Update environment strength
-        self.scene_uniform.environment_strength = [
+        // Set reasonable default lighting values (not exposed in UI but available for future use)
+        let default_light_dir = Vec3::new(3.0, -3.0, 3.0).normalize();
+        let default_light_strength = 0.8_f32;
+        let default_light_color = Vec3::new(1.0, 1.0, 1.0);
+        let default_ambient = Vec3::new(0.1, 0.1, 0.1) * 0.2;
+
+        self.scene_uniform.light_direction = vec3_to_array(default_light_dir, default_light_strength);
+        self.scene_uniform.light_color = vec3_to_array(default_light_color, 0.0);
+        self.scene_uniform.ambient_color = [
+            default_ambient.x as f32,
+            default_ambient.y as f32,
+            default_ambient.z as f32,
             self.ui_state.environment_strength,
-            0.0, // Padding
-            0.0, // Padding
-            0.0, // Padding
         ];
         self.scene_uniform.mesh_color = [
             self.ui_state.mesh_color[0],

@@ -4,7 +4,9 @@ struct SceneUniform {
     lower_left_corner: vec4<f32>,
     horizontal: vec4<f32>,
     vertical: vec4<f32>,
-    environment_strength: vec4<f32>, // x: environment strength, yzw: unused (padding)
+    light_direction: vec4<f32>, // xyz: direction, w: strength
+    light_color: vec4<f32>,
+    ambient_color: vec4<f32>,
     mesh_color: vec4<f32>,
     render_config: vec4<u32>,
     accel_info: vec4<u32>,
@@ -145,8 +147,8 @@ fn sky_color(ray_dir: vec3<f32>) -> vec3<f32> {
     // Sample the environment map using the sampler (this handles filtering properly)
     let env_color = textureSampleLevel(environment_map, environment_sampler, uv, 0.0);
 
-    // Apply environment strength
-    let environment_strength = scene.environment_strength.x;
+    // Apply environment strength (stored in ambient_color.w)
+    let environment_strength = scene.ambient_color.w;
 
     // Return the environment color scaled by strength (exposure already applied during texture loading)
     return env_color.rgb * environment_strength;

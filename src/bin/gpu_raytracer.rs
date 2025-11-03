@@ -79,6 +79,10 @@ async fn run() -> Result<()> {
 
     let (lower_left_corner, horizontal, vertical) = camera_frame(&camera);
 
+    let directional_dir = Vec3::new(3.0, -3.0, 3.0).normalize();
+    let directional_strength = 0.8_f64;
+    let directional_color = Vec3::new(1.0, 1.0, 1.0);
+    let ambient_color = Vec3::new(0.1, 0.1, 0.1) * 0.2;
     let samples_per_pixel = 256u32; // Increased from 10 to 100
     let max_bounces = 3u32;
 
@@ -91,7 +95,9 @@ async fn run() -> Result<()> {
         lower_left_corner: vec3_to_array(lower_left_corner, 0.0),
         horizontal: vec3_to_array(horizontal, 0.0),
         vertical: vec3_to_array(vertical, 0.0),
-        environment_strength: [1.0, 0.0, 0.0, 0.0], // Default environment strength
+        light_direction: vec3_to_array(directional_dir, directional_strength as f32),
+        light_color: vec3_to_array(directional_color, 0.0),
+        ambient_color: vec3_to_array(ambient_color, 1.0), // w: environment_strength
         mesh_color: vec3_to_array(bunny.material.color, 1.0),
         render_config: [samples_per_pixel, max_bounces, padded_width, 0],
         accel_info: [bvh_node_count, 0, 0, 0],
