@@ -292,11 +292,31 @@ mod tests {
         let texture = Texture::default();
         let light = EnvironmentLight::new(texture, 1.0);
 
-        // Test forward direction (0, 0, 1)
+        // Test positive Z direction (0, 0, 1)
+        // atan2(1.0, 0.0) = π/2, so u = 0.5 + 0.25 = 0.75
         let dir = Vec3::new(0.0, 0.0, 1.0);
         let (u, v) = light.direction_to_uv(&dir);
-        assert!((u - 0.5).abs() < 0.01);
-        assert!((v - 0.5).abs() < 0.01);
+        assert!((u - 0.75).abs() < 0.01, "Expected u ≈ 0.75, got {}", u);
+        assert!((v - 0.5).abs() < 0.01, "Expected v ≈ 0.5, got {}", v);
+
+        // Test positive X direction (1, 0, 0)
+        // atan2(0.0, 1.0) = 0, so u = 0.5 + 0.0 = 0.5
+        let dir = Vec3::new(1.0, 0.0, 0.0);
+        let (u, v) = light.direction_to_uv(&dir);
+        assert!((u - 0.5).abs() < 0.01, "Expected u ≈ 0.5, got {}", u);
+        assert!((v - 0.5).abs() < 0.01, "Expected v ≈ 0.5, got {}", v);
+
+        // Test positive Y direction (0, 1, 0) - straight up
+        // asin(1.0) = π/2, so v = 0.5 - 0.5 = 0.0
+        let dir = Vec3::new(0.0, 1.0, 0.0);
+        let (_u, v) = light.direction_to_uv(&dir);
+        assert!((v - 0.0).abs() < 0.01, "Expected v ≈ 0.0, got {}", v);
+
+        // Test negative Y direction (0, -1, 0) - straight down
+        // asin(-1.0) = -π/2, so v = 0.5 - (-0.5) = 1.0
+        let dir = Vec3::new(0.0, -1.0, 0.0);
+        let (_u, v) = light.direction_to_uv(&dir);
+        assert!((v - 1.0).abs() < 0.01, "Expected v ≈ 1.0, got {}", v);
     }
 
     #[test]
