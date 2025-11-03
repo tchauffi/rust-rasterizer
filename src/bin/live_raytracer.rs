@@ -2712,12 +2712,11 @@ async fn run() -> Result<()> {
                             }
                             TouchPhase::Moved => {
                                 let current_pos = (touch.location.x, touch.location.y);
-                                if state.mouse_pressed {
-                                    if let Some(last_pos) = state.last_mouse_pos {
-                                        let delta_x = current_pos.0 - last_pos.0;
-                                        let delta_y = current_pos.1 - last_pos.1;
-                                        state.handle_mouse_motion(delta_x, delta_y);
-                                    }
+                                if state.mouse_pressed
+                                    && let Some(last_pos) = state.last_mouse_pos {
+                                    let delta_x = current_pos.0 - last_pos.0;
+                                    let delta_y = current_pos.1 - last_pos.1;
+                                    state.handle_mouse_motion(delta_x, delta_y);
                                 }
                                 state.last_mouse_pos = Some(current_pos);
                             }
