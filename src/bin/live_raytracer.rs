@@ -23,6 +23,7 @@ use rust_raytracer::vec3::Vec3;
 use wasm_bindgen::prelude::*;
 use wgpu::util::DeviceExt;
 use winit::{event::*, event_loop::EventLoop, window::WindowBuilder};
+use winit::event::TouchPhase;
 
 const DEFAULT_ENV_MAP: &str = "data/rogland_sunset_4k.exr";
 const MAX_ENV_DIM: u32 = 2048;
@@ -2704,7 +2705,6 @@ async fn run() -> Result<()> {
                     }
                     WindowEvent::Touch(touch) => {
                         // Handle touch events for mobile devices
-                        use winit::event::TouchPhase;
                         match touch.phase {
                             TouchPhase::Started => {
                                 state.mouse_pressed = true;
@@ -2712,11 +2712,13 @@ async fn run() -> Result<()> {
                             }
                             TouchPhase::Moved => {
                                 let current_pos = (touch.location.x, touch.location.y);
-                                if state.mouse_pressed
-                                    && let Some(last_pos) = state.last_mouse_pos {
-                                    let delta_x = current_pos.0 - last_pos.0;
-                                    let delta_y = current_pos.1 - last_pos.1;
-                                    state.handle_mouse_motion(delta_x, delta_y);
+                                #[allow(clippy::collapsible_if)]
+                                if state.mouse_pressed {
+                                    if let Some(last_pos) = state.last_mouse_pos {
+                                        let delta_x = current_pos.0 - last_pos.0;
+                                        let delta_y = current_pos.1 - last_pos.1;
+                                        state.handle_mouse_motion(delta_x, delta_y);
+                                    }
                                 }
                                 state.last_mouse_pos = Some(current_pos);
                             }
