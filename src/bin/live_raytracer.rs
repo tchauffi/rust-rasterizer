@@ -1755,6 +1755,7 @@ impl State {
         let accumulated_frames = self.accumulated_frames;
         let mut needs_update = false;
         let mut requested_environment: Option<String> = None;
+        let mut toggle_render_mode = false;
 
         let full_output = {
             let ui_state = &mut self.ui_state;
@@ -2161,6 +2162,7 @@ impl State {
 
             // FPS overlay - make it more compact on mobile
             let screen_width = ctx.screen_rect().width();
+            let screen_height = ctx.screen_rect().height();
             let is_mobile = screen_width < 768.0;
             
             egui::Area::new(egui::Id::new("fps"))
@@ -2175,7 +2177,7 @@ impl State {
                             if use_raytracing { "RT" } else { "N" },
                             accumulated_frames
                         ));
-                        ui.label("TAB: UI | SPACE: Mode");
+                        ui.label("Touch & drag to rotate camera");
                     } else {
                         // Full view for desktop
                         ui.label(format!("FPS: {:.1}", current_fps));
@@ -2192,6 +2194,39 @@ impl State {
                         ui.label("Press SPACE to toggle render mode");
                     }
                 });
+
+            // Add floating action buttons for mobile
+            if is_mobile {
+                // UI toggle button (bottom right)
+                egui::Area::new(egui::Id::new("mobile_ui_toggle"))
+                    .fixed_pos(egui::pos2(screen_width - 60.0, screen_height - 130.0))
+                    .show(ctx, |ui| {
+                        let button_size = egui::vec2(50.0, 50.0);
+                        ui.style_mut().spacing.button_padding = egui::vec2(12.0, 12.0);
+                        
+                        if ui.add_sized(button_size, egui::Button::new(if ui_state.show_ui { "📐" } else { "🎛️" }))
+                            .on_hover_text(if ui_state.show_ui { "Hide UI" } else { "Show UI" })
+                            .clicked() 
+                        {
+                            ui_state.show_ui = !ui_state.show_ui;
+                        }
+                    });
+
+                // Render mode toggle button (bottom right, above UI toggle)
+                egui::Area::new(egui::Id::new("mobile_mode_toggle"))
+                    .fixed_pos(egui::pos2(screen_width - 60.0, screen_height - 70.0))
+                    .show(ctx, |ui| {
+                        let button_size = egui::vec2(50.0, 50.0);
+                        ui.style_mut().spacing.button_padding = egui::vec2(12.0, 12.0);
+                        
+                        if ui.add_sized(button_size, egui::Button::new(if use_raytracing { "🔆" } else { "🔵" }))
+                            .on_hover_text(if use_raytracing { "Switch to Normals" } else { "Switch to Raytracing" })
+                            .clicked() 
+                        {
+                            toggle_render_mode = true;
+                        }
+                    });
+            }
             })
         };
 
@@ -2200,6 +2235,16 @@ impl State {
 
         if let Some(path) = requested_environment {
             self.request_environment_change(path);
+        }
+
+        // Toggle render mode if requested from mobile UI
+        if toggle_render_mode {
+            self.use_raytracing = !self.use_raytracing;
+            self.accumulated_frames = 0;
+            self.scene_uniform.render_config[3] = 0;
+            self.camera_moved = true;
+            #[cfg(target_arch = "wasm32")]
+            log::info!("Switched to {} mode", if self.use_raytracing { "Raytracing" } else { "Normals" });
         }
 
         // Update scene if needed
