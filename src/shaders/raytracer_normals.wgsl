@@ -4,9 +4,7 @@ struct SceneUniform {
     lower_left_corner: vec4<f32>,
     horizontal: vec4<f32>,
     vertical: vec4<f32>,
-    light_direction: vec4<f32>, // xyz: direction, w: strength
-    light_color: vec4<f32>,
-    ambient_color: vec4<f32>,
+    environment_strength: vec4<f32>, // x: environment strength, yzw: unused (padding)
     mesh_color: vec4<f32>,
     render_config: vec4<u32>,
     accel_info: vec4<u32>,

@@ -37,9 +37,7 @@ pub struct SceneUniform {
     pub lower_left_corner: [f32; 4],
     pub horizontal: [f32; 4],
     pub vertical: [f32; 4],
-    pub light_direction: [f32; 4], // xyz: direction, w: intensity
-    pub light_color: [f32; 4],
-    pub ambient_color: [f32; 4],
+    pub environment_strength: [f32; 4], // x: environment strength, yzw: unused (padding)
     pub mesh_color: [f32; 4],
     pub render_config: [u32; 4], // samples_per_pixel, max_bounces, padded_width_in_pixels, frame_seed
     pub accel_info: [u32; 4],    // bvh_node_count, reserved
