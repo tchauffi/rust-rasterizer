@@ -61,22 +61,36 @@
 
         #error {
             display: none;
-            position: absolute;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
             color: #ff6b6b;
-            font-size: 16px;
-            text-align: center;
-            max-width: 80%;
-            padding: 20px;
-            background: rgba(0, 0, 0, 0.8);
+            font-size: 14px;
+            text-align: left;
+            max-width: 400px;
+            padding: 15px 20px;
+            background: rgba(0, 0, 0, 0.9);
             border-radius: 8px;
             border: 2px solid #ff6b6b;
+            z-index: 1000;
+            cursor: pointer;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
         }
 
         #error.visible {
             display: block;
+        }
+
+        #error:hover {
+            background: rgba(0, 0, 0, 0.95);
+        }
+
+        #error .close-btn {
+            float: right;
+            margin-left: 10px;
+            font-weight: bold;
+            font-size: 18px;
+            line-height: 1;
         }
     </style>
     <script>
@@ -102,11 +116,12 @@
         </p>
     </div>
 
-    <div id="error">
-        <h2>⚠️ Failed to Initialize</h2>
-        <p id="error-message"></p>
-        <p style="font-size: 14px; margin-top: 10px;">
-            Check the browser console (F12) for more details.
+    <div id="error" onclick="this.classList.remove('visible')">
+        <span class="close-btn">×</span>
+        <strong>⚠️ Error:</strong>
+        <p id="error-message" style="margin: 5px 0 0 0;"></p>
+        <p style="font-size: 12px; margin-top: 8px; opacity: 0.7;">
+            Click to dismiss. Check console for details.
         </p>
     </div>
 
@@ -141,8 +156,16 @@
 
             console.error('Error:', e);
             document.getElementById('loading').classList.add('hidden');
-            document.getElementById('error').classList.add('visible');
+
+            // Show non-blocking error notification
+            const errorEl = document.getElementById('error');
             document.getElementById('error-message').textContent = message || 'Unknown error occurred';
+            errorEl.classList.add('visible');
+
+            // Auto-dismiss after 10 seconds
+            setTimeout(() => {
+                errorEl.classList.remove('visible');
+            }, 10000);
         });
 
         // Listen for unhandled promise rejections
@@ -155,8 +178,16 @@
 
             console.error('Unhandled rejection:', e.reason);
             document.getElementById('loading').classList.add('hidden');
-            document.getElementById('error').classList.add('visible');
+
+            // Show non-blocking error notification
+            const errorEl = document.getElementById('error');
             document.getElementById('error-message').textContent = message || 'WebGPU initialization failed';
+            errorEl.classList.add('visible');
+
+            // Auto-dismiss after 10 seconds
+            setTimeout(() => {
+                errorEl.classList.remove('visible');
+            }, 10000);
         });
     </script>
 </body>
