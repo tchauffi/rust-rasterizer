@@ -55,6 +55,9 @@ struct UIState {
     mesh_position: [f32; 3],
     mesh_roughness: f32,
     mesh_metallic: f32,
+    
+    // Track last applied mesh position to detect changes
+    last_applied_mesh_position: [f32; 3],
 
     // Scene objects
     objects: Vec<SceneObject>,
@@ -700,6 +703,7 @@ impl State {
         let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
         let padded_width = padded_bytes_per_row / bytes_per_pixel;
 
+        let mesh_material_type = if bunny.material.metallic > 0.5 { 1.0 } else { 0.0 };
         let scene_uniform = SceneUniform {
             resolution: [width, height, triangle_count, sphere_count],
             camera_position: vec3_to_array(camera.position, 0.0),
@@ -710,6 +714,7 @@ impl State {
             light_color: vec3_to_array(directional_color, 0.0),
             ambient_color: vec3_to_array(ambient_color, 1.0), // w: environment_strength
             mesh_color: vec3_to_array(bunny.material.color, 1.0),
+            mesh_material: [bunny.material.roughness as f32, bunny.material.metallic as f32, mesh_material_type, 0.0],
             render_config: [samples_per_pixel, max_bounces, padded_width, 0],
             accel_info: [bvh_node_count, 0, 0, 0],
         };
@@ -1270,6 +1275,7 @@ impl State {
             mesh_position: [0.0, -1.0, 4.0],
             mesh_roughness: 0.5,
             mesh_metallic: 0.0,
+            last_applied_mesh_position: [0.0, -1.0, 4.0],
             objects: vec![
                 SceneObject {
                     name: "Ground Sphere".to_string(),
@@ -1612,13 +1618,23 @@ impl State {
             self.ui_state.mesh_color[2],
             1.0,
         ];
+        let mesh_material_type = if self.ui_state.mesh_metallic > 0.5 { 1.0 } else { 0.0 };
+        self.scene_uniform.mesh_material = [
+            self.ui_state.mesh_roughness,
+            self.ui_state.mesh_metallic,
+            mesh_material_type,
+            0.0,
+        ];
 
         // Check if mesh properties have changed
         let mesh_changed = self.bunny_mesh.material.color.x != self.ui_state.mesh_color[0] as f64
             || self.bunny_mesh.material.color.y != self.ui_state.mesh_color[1] as f64
             || self.bunny_mesh.material.color.z != self.ui_state.mesh_color[2] as f64
             || self.bunny_mesh.material.roughness != self.ui_state.mesh_roughness as f64
-            || self.bunny_mesh.material.metallic != self.ui_state.mesh_metallic as f64;
+            || self.bunny_mesh.material.metallic != self.ui_state.mesh_metallic as f64
+            || self.ui_state.last_applied_mesh_position[0] != self.ui_state.mesh_position[0]
+            || self.ui_state.last_applied_mesh_position[1] != self.ui_state.mesh_position[1]
+            || self.ui_state.last_applied_mesh_position[2] != self.ui_state.mesh_position[2];
 
         // Only rebuild mesh if properties changed
         if mesh_changed {
@@ -1668,6 +1684,9 @@ impl State {
             self.scene_uniform.resolution[2] = triangles.len() as u32; // triangle count
             self.scene_uniform.accel_info[0] = bvh_nodes.len() as u32; // BVH node count
             self.bunny_mesh = mesh;
+            
+            // Update tracking of last applied position
+            self.ui_state.last_applied_mesh_position = self.ui_state.mesh_position;
         }
 
         self.scene_uniform.render_config[0] = self.ui_state.samples_per_pixel;

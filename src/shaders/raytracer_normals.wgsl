@@ -8,6 +8,7 @@ struct SceneUniform {
     light_color: vec4<f32>,
     ambient_color: vec4<f32>,
     mesh_color: vec4<f32>,
+    mesh_material: vec4<f32>, // x: roughness, y: metallic, z: material_type, w: unused
     render_config: vec4<u32>,
     accel_info: vec4<u32>,
 };

@@ -41,6 +41,7 @@ pub struct SceneUniform {
     pub light_color: [f32; 4],
     pub ambient_color: [f32; 4],
     pub mesh_color: [f32; 4],
+    pub mesh_material: [f32; 4], // x: roughness, y: metallic, z: material_type (0.0=diffuse, 1.0=metallic), w: unused
     pub render_config: [u32; 4], // samples_per_pixel, max_bounces, padded_width_in_pixels, frame_seed
     pub accel_info: [u32; 4],    // bvh_node_count, reserved
 }
