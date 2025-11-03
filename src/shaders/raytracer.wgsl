@@ -8,6 +8,7 @@ struct SceneUniform {
     light_color: vec4<f32>,
     ambient_color: vec4<f32>,
     mesh_color: vec4<f32>,
+    mesh_material: vec4<f32>, // x: roughness, y: metallic, z: material_type, w: unused
     render_config: vec4<u32>,
     accel_info: vec4<u32>,
 };
@@ -194,9 +195,9 @@ fn intersect_triangle(origin: vec3<f32>, dir: vec3<f32>, tri: Triangle) -> HitIn
         info.normal = normalize(interpolated);
         info.color = scene.mesh_color.xyz;
         info.hit = true;
-        info.roughness = 0.5;
-        info.metallic = 0.0;
-        info.material_type = 0.0; // Diffuse
+        info.roughness = scene.mesh_material.x;
+        info.metallic = scene.mesh_material.y;
+        info.material_type = scene.mesh_material.z;
     }
 
     return info;
