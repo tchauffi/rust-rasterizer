@@ -25,8 +25,8 @@ use rust_raytracer::vec3::Vec3;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 use wgpu::util::DeviceExt;
-use winit::{event::*, event_loop::EventLoop, window::WindowBuilder};
 use winit::event::TouchPhase;
+use winit::{event::*, event_loop::EventLoop, window::WindowBuilder};
 
 const DEFAULT_ENV_MAP: &str = "data/rogland_sunset_4k.exr";
 const MAX_ENV_DIM: u32 = 2048;
@@ -58,7 +58,7 @@ struct UIState {
     mesh_position: [f32; 3],
     mesh_roughness: f32,
     mesh_metallic: f32,
-    
+
     // Track last applied mesh position to detect changes
     last_applied_mesh_position: [f32; 3],
 
@@ -77,6 +77,9 @@ struct UIState {
 
     // UI visibility
     show_ui: bool,
+
+    // Track if we've initialized based on screen size
+    ui_initialized: bool,
 }
 
 struct State {
@@ -706,7 +709,11 @@ impl State {
         let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
         let padded_width = padded_bytes_per_row / bytes_per_pixel;
 
-        let mesh_material_type = if bunny.material.metallic as f32 > METALLIC_THRESHOLD { 1.0 } else { 0.0 };
+        let mesh_material_type = if bunny.material.metallic as f32 > METALLIC_THRESHOLD {
+            1.0
+        } else {
+            0.0
+        };
         let scene_uniform = SceneUniform {
             resolution: [width, height, triangle_count, sphere_count],
             camera_position: vec3_to_array(camera.position, 0.0),
@@ -717,7 +724,12 @@ impl State {
             light_color: vec3_to_array(directional_color, 0.0),
             ambient_color: vec3_to_array(ambient_color, 1.0), // w: environment_strength
             mesh_color: vec3_to_array(bunny.material.color, 1.0),
-            mesh_material: [bunny.material.roughness as f32, bunny.material.metallic as f32, mesh_material_type, 0.0],
+            mesh_material: [
+                bunny.material.roughness as f32,
+                bunny.material.metallic as f32,
+                mesh_material_type,
+                0.0,
+            ],
             render_config: [samples_per_pixel, max_bounces, padded_width, 0],
             accel_info: [bvh_node_count, 0, 0, 0],
         };
@@ -1313,7 +1325,8 @@ impl State {
             new_object_radius: 1.0,
             new_object_color: [1.0, 1.0, 1.0],
             show_file_upload_dialog: false,
-            show_ui: true,
+            show_ui: true, // Will be adjusted on first frame based on screen size
+            ui_initialized: false,
         };
 
         let mut state = Self {
@@ -1611,7 +1624,8 @@ impl State {
         let default_light_color = Vec3::new(1.0, 1.0, 1.0);
         let default_ambient = Vec3::new(0.1, 0.1, 0.1) * 0.2;
 
-        self.scene_uniform.light_direction = vec3_to_array(default_light_dir, default_light_strength);
+        self.scene_uniform.light_direction =
+            vec3_to_array(default_light_dir, default_light_strength);
         self.scene_uniform.light_color = vec3_to_array(default_light_color, 0.0);
         self.scene_uniform.ambient_color = [
             default_ambient.x as f32,
@@ -1625,7 +1639,11 @@ impl State {
             self.ui_state.mesh_color[2],
             1.0,
         ];
-        let mesh_material_type = if self.ui_state.mesh_metallic > METALLIC_THRESHOLD { 1.0 } else { 0.0 };
+        let mesh_material_type = if self.ui_state.mesh_metallic > METALLIC_THRESHOLD {
+            1.0
+        } else {
+            0.0
+        };
         self.scene_uniform.mesh_material = [
             self.ui_state.mesh_roughness,
             self.ui_state.mesh_metallic,
@@ -1639,7 +1657,10 @@ impl State {
             || self.bunny_mesh.material.color.z != self.ui_state.mesh_color[2] as f64
             || self.bunny_mesh.material.roughness != self.ui_state.mesh_roughness as f64
             || self.bunny_mesh.material.metallic != self.ui_state.mesh_metallic as f64
-            || Self::position_changed(&self.ui_state.last_applied_mesh_position, &self.ui_state.mesh_position);
+            || Self::position_changed(
+                &self.ui_state.last_applied_mesh_position,
+                &self.ui_state.mesh_position,
+            );
 
         // Only rebuild mesh if properties changed
         if mesh_changed {
@@ -1689,7 +1710,7 @@ impl State {
             self.scene_uniform.resolution[2] = triangles.len() as u32; // triangle count
             self.scene_uniform.accel_info[0] = bvh_nodes.len() as u32; // BVH node count
             self.bunny_mesh = mesh;
-            
+
             // Update tracking of last applied position
             self.ui_state.last_applied_mesh_position = self.ui_state.mesh_position;
         }
@@ -1795,9 +1816,15 @@ impl State {
                 style.spacing.scroll.bar_outer_margin = 4.0;
             });
 
+            // Initialize UI state based on screen size on first frame
+            let screen_width = ctx.screen_rect().width();
+            if !ui_state.ui_initialized {
+                ui_state.show_ui = screen_width >= 768.0; // Hide UI by default on mobile
+                ui_state.ui_initialized = true;
+            }
+
             if ui_state.show_ui {
                 // Adjust panel width based on screen size
-                let screen_width = ctx.screen_rect().width();
                 let panel_width = if screen_width < 768.0 {
                     // Mobile: use most of the screen width
                     (screen_width * 0.85).max(280.0).min(screen_width - 40.0)
@@ -1937,7 +1964,7 @@ impl State {
                                         )
                                         .changed()
                                     {
-                                        needs_update = true;
+                                                                               needs_update = true;
                                     }
                                     if ui
                                         .add(
@@ -2189,15 +2216,15 @@ impl State {
             let screen_width = ctx.screen_rect().width();
             let screen_height = ctx.screen_rect().height();
             let is_mobile = screen_width < 768.0;
-            
+
             egui::Area::new(egui::Id::new("fps"))
                 .fixed_pos(egui::pos2(10.0, 10.0))
                 .show(ctx, |ui| {
                     ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgba_premultiplied(255, 255, 255, 230));
-                    
+
                     if is_mobile {
                         // Compact view for mobile
-                        ui.label(format!("FPS: {:.1} | {} | Frames: {}", 
+                        ui.label(format!("FPS: {:.1} | {} | Frames: {}",
                             current_fps,
                             if use_raytracing { "RT" } else { "N" },
                             accumulated_frames
@@ -2228,10 +2255,10 @@ impl State {
                     .show(ctx, |ui| {
                         let button_size = egui::vec2(50.0, 50.0);
                         ui.style_mut().spacing.button_padding = egui::vec2(12.0, 12.0);
-                        
+
                         if ui.add_sized(button_size, egui::Button::new(if ui_state.show_ui { "📐" } else { "🎛️" }))
                             .on_hover_text(if ui_state.show_ui { "Hide UI" } else { "Show UI" })
-                            .clicked() 
+                            .clicked()
                         {
                             ui_state.show_ui = !ui_state.show_ui;
                         }
@@ -2243,10 +2270,10 @@ impl State {
                     .show(ctx, |ui| {
                         let button_size = egui::vec2(50.0, 50.0);
                         ui.style_mut().spacing.button_padding = egui::vec2(12.0, 12.0);
-                        
+
                         if ui.add_sized(button_size, egui::Button::new(if use_raytracing { "🔆" } else { "🔵" }))
                             .on_hover_text(if use_raytracing { "Switch to Normals" } else { "Switch to Raytracing" })
-                            .clicked() 
+                            .clicked()
                         {
                             toggle_render_mode = true;
                         }
@@ -2269,7 +2296,14 @@ impl State {
             self.scene_uniform.render_config[3] = 0;
             self.camera_moved = true;
             #[cfg(target_arch = "wasm32")]
-            log::info!("Switched to {} mode", if self.use_raytracing { "Raytracing" } else { "Normals" });
+            log::info!(
+                "Switched to {} mode",
+                if self.use_raytracing {
+                    "Raytracing"
+                } else {
+                    "Normals"
+                }
+            );
         }
 
         // Update scene if needed
