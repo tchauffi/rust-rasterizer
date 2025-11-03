@@ -1759,10 +1759,31 @@ impl State {
         let full_output = {
             let ui_state = &mut self.ui_state;
             self.egui_ctx.run(raw_input, |ctx| {
+            // Configure better touch interaction for mobile
+            ctx.style_mut(|style| {
+                // Increase spacing for better touch targets
+                style.spacing.interact_size.y = style.spacing.interact_size.y.max(32.0);
+                style.spacing.slider_width = style.spacing.slider_width.max(150.0);
+                // Increase scroll bar width for easier touch interaction
+                style.spacing.scroll.bar_width = style.spacing.scroll.bar_width.max(12.0);
+                style.spacing.scroll.bar_outer_margin = 4.0;
+            });
+
             if ui_state.show_ui {
+                // Adjust panel width based on screen size
+                let screen_width = ctx.screen_rect().width();
+                let panel_width = if screen_width < 768.0 {
+                    // Mobile: use most of the screen width
+                    (screen_width * 0.85).max(280.0).min(screen_width - 40.0)
+                } else {
+                    // Desktop: fixed width
+                    320.0
+                };
+
                 egui::SidePanel::right("scene_editor")
-                    .default_width(320.0)
-                    .resizable(true)
+                    .default_width(panel_width)
+                    .max_width(screen_width - 40.0)
+                    .resizable(screen_width >= 768.0)
                     .show(ctx, |ui| {
                         egui::ScrollArea::vertical().show(ui, |ui| {
                             ui.heading("Scene Editor");
@@ -2138,22 +2159,38 @@ impl State {
                     });
             }
 
-            // FPS overlay
+            // FPS overlay - make it more compact on mobile
+            let screen_width = ctx.screen_rect().width();
+            let is_mobile = screen_width < 768.0;
+            
             egui::Area::new(egui::Id::new("fps"))
                 .fixed_pos(egui::pos2(10.0, 10.0))
                 .show(ctx, |ui| {
-                    ui.label(format!("FPS: {:.1}", current_fps));
-                    ui.label(format!(
-                        "Mode: {}",
-                        if use_raytracing {
-                            "Raytracing"
-                        } else {
-                            "Normals"
-                        }
-                    ));
-                    ui.label(format!("Accumulated Frames: {}", accumulated_frames));
-                    ui.label("Press TAB to toggle UI");
-                    ui.label("Press SPACE to toggle render mode");
+                    ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgba_premultiplied(255, 255, 255, 230));
+                    
+                    if is_mobile {
+                        // Compact view for mobile
+                        ui.label(format!("FPS: {:.1} | {} | Frames: {}", 
+                            current_fps,
+                            if use_raytracing { "RT" } else { "N" },
+                            accumulated_frames
+                        ));
+                        ui.label("TAB: UI | SPACE: Mode");
+                    } else {
+                        // Full view for desktop
+                        ui.label(format!("FPS: {:.1}", current_fps));
+                        ui.label(format!(
+                            "Mode: {}",
+                            if use_raytracing {
+                                "Raytracing"
+                            } else {
+                                "Normals"
+                            }
+                        ));
+                        ui.label(format!("Accumulated Frames: {}", accumulated_frames));
+                        ui.label("Press TAB to toggle UI");
+                        ui.label("Press SPACE to toggle render mode");
+                    }
                 });
             })
         };
@@ -2619,6 +2656,31 @@ async fn run() -> Result<()> {
                         }
 
                         state.last_mouse_pos = Some(current_pos);
+                    }
+                    WindowEvent::Touch(touch) => {
+                        // Handle touch events for mobile devices
+                        use winit::event::TouchPhase;
+                        match touch.phase {
+                            TouchPhase::Started => {
+                                state.mouse_pressed = true;
+                                state.last_mouse_pos = Some((touch.location.x, touch.location.y));
+                            }
+                            TouchPhase::Moved => {
+                                let current_pos = (touch.location.x, touch.location.y);
+                                if state.mouse_pressed {
+                                    if let Some(last_pos) = state.last_mouse_pos {
+                                        let delta_x = current_pos.0 - last_pos.0;
+                                        let delta_y = current_pos.1 - last_pos.1;
+                                        state.handle_mouse_motion(delta_x, delta_y);
+                                    }
+                                }
+                                state.last_mouse_pos = Some(current_pos);
+                            }
+                            TouchPhase::Ended | TouchPhase::Cancelled => {
+                                state.mouse_pressed = false;
+                                state.last_mouse_pos = None;
+                            }
+                        }
                     }
                     WindowEvent::RedrawRequested => {
                         // Update camera based on elapsed time
