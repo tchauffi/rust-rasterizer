@@ -20,7 +20,7 @@
             display: flex;
             justify-content: center;
             align-items: center;
-            background: linear-gradient(135deg, #1a1a2e 0%, #0f0f1e 100%);
+            background: linear-gradient(135deg, #2a2a3e 0%, #1a1a2e 100%);
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
             touch-action: none;
             -webkit-user-select: none;
@@ -53,25 +53,58 @@
             color: #ffffff;
             font-size: 18px;
             text-align: center;
+            background: rgba(0, 0, 0, 0.3);
+            padding: 40px 60px;
+            border-radius: 16px;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+            max-width: 90%;
+            transition: opacity 0.3s ease-out;
         }
 
         #loading.hidden {
-            display: none;
+            opacity: 0;
+            pointer-events: none;
         }
 
         .spinner {
-            border: 4px solid rgba(255, 255, 255, 0.1);
-            border-top: 4px solid #ffffff;
+            border: 4px solid rgba(100, 150, 255, 0.2);
+            border-top: 4px solid #6496ff;
             border-radius: 50%;
-            width: 40px;
-            height: 40px;
+            width: 60px;
+            height: 60px;
             animation: spin 1s linear infinite;
-            margin: 0 auto 20px;
+            margin: 0 auto 25px;
         }
 
         @keyframes spin {
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
+        }
+
+        #loading .loading-title {
+            font-size: 24px;
+            font-weight: 600;
+            margin-bottom: 15px;
+        }
+
+        #loading .loading-subtitle {
+            font-size: 14px;
+            opacity: 0.8;
+            margin-top: 15px;
+            line-height: 1.5;
+        }
+
+        #loading .loading-progress {
+            margin-top: 20px;
+            font-size: 13px;
+            color: #6496ff;
+            opacity: 0;
+            animation: fadeIn 0.5s ease-in 1s forwards;
+        }
+
+        @keyframes fadeIn {
+            to { opacity: 1; }
         }
 
         #error {
@@ -136,10 +169,15 @@
 <body>
     <div id="loading">
         <div class="spinner"></div>
-        <p>Loading GPU Raytracer...</p>
-        <p style="font-size: 14px; margin-top: 10px; opacity: 0.7;">
-            Requires WebGPU support (Chrome/Edge)
+        <div class="loading-title">GPU Raytracer</div>
+        <p>Initializing WebGPU renderer...</p>
+        <p class="loading-subtitle">
+            This may take a few moments on first load.<br>
+            Requires WebGPU support (Chrome/Edge 113+)
         </p>
+        <div class="loading-progress">
+            Loading 3D assets and shaders...
+        </div>
     </div>
 
     <div id="error" onclick="this.classList.remove('visible')">
@@ -158,12 +196,42 @@
     <link data-trunk rel="copy-dir" href="data"/>
 
     <script>
+        // Track loading progress
+        let loadingStartTime = Date.now();
+        let progressUpdateInterval;
+
+        function updateLoadingProgress() {
+            const elapsed = Math.floor((Date.now() - loadingStartTime) / 1000);
+            const progressEl = document.querySelector('.loading-progress');
+            if (progressEl && elapsed > 1) {
+                if (elapsed < 5) {
+                    progressEl.textContent = 'Loading 3D assets and shaders...';
+                } else if (elapsed < 10) {
+                    progressEl.textContent = 'Compiling compute shaders...';
+                } else if (elapsed < 15) {
+                    progressEl.textContent = 'Initializing GPU resources...';
+                } else {
+                    progressEl.textContent = 'Almost ready...';
+                }
+            }
+        }
+
         // Hide loading spinner when canvas appears
         function hideLoadingWhenCanvasReady() {
             const canvas = document.querySelector('canvas');
             if (canvas) {
-                document.getElementById('loading').classList.add('hidden');
+                const loadingEl = document.getElementById('loading');
+                loadingEl.classList.add('hidden');
+                // Remove from DOM after transition
+                setTimeout(() => {
+                    if (loadingEl.parentNode) {
+                        loadingEl.style.display = 'none';
+                    }
+                }, 300);
                 console.log('Canvas found, hiding loading screen');
+                if (progressUpdateInterval) {
+                    clearInterval(progressUpdateInterval);
+                }
                 return true;
             }
             return false;
@@ -171,6 +239,10 @@
 
         // Try to hide loading when page loads
         window.addEventListener('load', () => {
+            // Start progress updates
+            progressUpdateInterval = setInterval(updateLoadingProgress, 1000);
+            updateLoadingProgress();
+
             // Check immediately
             if (hideLoadingWhenCanvasReady()) {
                 return;
@@ -190,17 +262,20 @@
                 subtree: true
             });
 
-            // Fallback: if canvas still not found after 10 seconds, hide loader anyway
+            // Fallback: if canvas still not found after 15 seconds, hide loader anyway
             setTimeout(() => {
                 if (observerActive) {
                     if (!document.querySelector('canvas')) {
-                        console.warn('Canvas still not found after 10 seconds, hiding loader anyway');
+                        console.warn('Canvas still not found after 15 seconds, hiding loader anyway');
                         document.getElementById('loading').classList.add('hidden');
                     }
                     observerActive = false;
                     observer.disconnect();
+                    if (progressUpdateInterval) {
+                        clearInterval(progressUpdateInterval);
+                    }
                 }
-            }, 10000);
+            }, 15000);
         });
 
         // Catch any errors
@@ -212,17 +287,25 @@
             }
 
             console.error('Error:', e);
-            document.getElementById('loading').classList.add('hidden');
-
-            // Show non-blocking error notification
-            const errorEl = document.getElementById('error');
-            document.getElementById('error-message').textContent = message || 'Unknown error occurred';
-            errorEl.classList.add('visible');
-
-            // Auto-dismiss after 10 seconds
+            
+            // Only hide loading if canvas hasn't appeared yet after some time
             setTimeout(() => {
-                errorEl.classList.remove('visible');
-            }, 10000);
+                if (!document.querySelector('canvas')) {
+                    document.getElementById('loading').classList.add('hidden');
+                }
+            }, 500);
+
+            // Show non-blocking error notification only if it seems serious
+            if (!message.includes('Failed to fetch') && message.length > 0) {
+                const errorEl = document.getElementById('error');
+                document.getElementById('error-message').textContent = message || 'Unknown error occurred';
+                errorEl.classList.add('visible');
+
+                // Auto-dismiss after 10 seconds
+                setTimeout(() => {
+                    errorEl.classList.remove('visible');
+                }, 10000);
+            }
         });
 
         // Listen for unhandled promise rejections
@@ -234,17 +317,25 @@
             }
 
             console.error('Unhandled rejection:', e.reason);
-            document.getElementById('loading').classList.add('hidden');
-
-            // Show non-blocking error notification
-            const errorEl = document.getElementById('error');
-            document.getElementById('error-message').textContent = message || 'WebGPU initialization failed';
-            errorEl.classList.add('visible');
-
-            // Auto-dismiss after 10 seconds
+            
+            // Only hide loading if this seems like a real error
             setTimeout(() => {
-                errorEl.classList.remove('visible');
-            }, 10000);
+                if (!document.querySelector('canvas')) {
+                    document.getElementById('loading').classList.add('hidden');
+                }
+            }, 500);
+
+            // Show non-blocking error notification for serious issues
+            if (message.includes('WebGPU') || message.includes('GPU') || message.includes('adapter')) {
+                const errorEl = document.getElementById('error');
+                document.getElementById('error-message').textContent = message || 'WebGPU initialization failed. Please ensure you are using Chrome/Edge 113+ with WebGPU enabled.';
+                errorEl.classList.add('visible');
+
+                // Auto-dismiss after 12 seconds for important errors
+                setTimeout(() => {
+                    errorEl.classList.remove('visible');
+                }, 12000);
+            }
         });
     </script>
 </body>
