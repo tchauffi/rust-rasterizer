@@ -6,7 +6,7 @@
 
 ## 🚀 Quick Start
 
-**Try it online:** [Live WebGPU Raytracer](https://tchauffi.github.io/rust-rasterizer/)
+**Try it online:** [Live WebGPU Raytracer](https://tchauffi.github.io/rust-raytracer/)
 
 **Run locally:**
 ```bash
