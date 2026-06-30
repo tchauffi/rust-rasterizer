@@ -648,13 +648,13 @@ impl State {
             1.0,
             Material::new_metallic(Vec3::new(0.8, 1.0, 0.8), 0.1), // Light green, low roughness = very shiny
         );
-        // Blue diffuse sphere for comparison
+        // Clear glass sphere (refractive) - matches the UI scene default
         let sphere3 = Sphere::new(
             Vec3::new(-1.6, 0.0, 5.0),
             1.0,
-            Material::new(Vec3::new(0.0, 0.0, 1.0), 0.5),
+            Material::new_dielectric(Vec3::new(1.0, 1.0, 1.0), 0.0),
         );
-        eprintln!("Green sphere at (2.0, 0.0, 5.0), Blue sphere at (-1.6, 0.0, 5.0)");
+        eprintln!("Green sphere at (2.0, 0.0, 5.0), Glass sphere at (-1.6, 0.0, 5.0)");
         let spheres = [sphere1, sphere2, sphere3];
 
         let (triangles, mut bvh_nodes) = mesh_to_gpu_data(&bunny);
