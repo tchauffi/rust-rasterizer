@@ -139,18 +139,50 @@ fn cosine_sample_hemisphere(normal: vec3<f32>, seed: vec3<u32>) -> vec3<f32> {
     return normalize(tangent * x + bitangent * y + normal * z);
 }
 
-// Choose an outgoing direction for the surface interaction. The specular and
-// diffuse lobes are selected stochastically with probability `metallic`; because
-// each lobe's BRDF weight is cancelled by its selection probability, the caller
-// updates throughput simply with *= albedo, keeping the path tracer energy
-// conserving (no ad-hoc loss factors).
+// Material type tags (must match gpu_scene.rs / sphere_to_gpu): 0 diffuse,
+// 1 metallic, 2 dielectric (glass).
+const MATERIAL_DIELECTRIC: f32 = 1.5; // threshold: material_type > this == glass
+const GLASS_IOR: f32 = 1.5;
+
+// Choose an outgoing direction for the surface interaction.
+// - Dielectric (glass): stochastically reflect or refract using the Fresnel
+//   (Schlick) reflectance, handling total internal reflection.
+// - Otherwise: specular and diffuse lobes are selected stochastically with
+//   probability `metallic`; because each lobe's BRDF weight is cancelled by its
+//   selection probability, the caller updates throughput simply with *= albedo,
+//   keeping the path tracer energy conserving (no ad-hoc loss factors).
 fn scatter_direction(
     incident_dir: vec3<f32>,
     normal: vec3<f32>,
     roughness: f32,
     metallic: f32,
+    material_type: f32,
     seed: vec3<u32>
 ) -> vec3<f32> {
+    if (material_type > MATERIAL_DIELECTRIC) {
+        let unit_in = normalize(incident_dir);
+        // Outward normal points away from the surface; orient it against the
+        // incoming ray and pick the index ratio for entering vs exiting glass.
+        let front_face = dot(unit_in, normal) < 0.0;
+        let oriented_n = select(-normal, normal, front_face);
+        let eta = select(GLASS_IOR, 1.0 / GLASS_IOR, front_face);
+
+        let cos_theta = min(dot(-unit_in, oriented_n), 1.0);
+        let sin_theta = sqrt(max(0.0, 1.0 - cos_theta * cos_theta));
+
+        // Schlick approximation of the Fresnel reflectance.
+        let r0_root = (1.0 - eta) / (1.0 + eta);
+        let r0 = r0_root * r0_root;
+        let reflectance = r0 + (1.0 - r0) * pow(1.0 - cos_theta, 5.0);
+
+        let xi = random_float(seed + vec3<u32>(211u, 97u, 41u));
+        // Total internal reflection, or a Fresnel-weighted reflection event.
+        if (eta * sin_theta > 1.0 || reflectance > xi) {
+            return reflect(unit_in, oriented_n);
+        }
+        return refract(unit_in, oriented_n, eta);
+    }
+
     let select_specular = random_float(seed + vec3<u32>(101u, 53u, 29u)) < metallic;
     if (select_specular) {
         let reflected = reflect(incident_dir, normal);
@@ -404,6 +436,20 @@ fn trace_ray(origin: vec3<f32>, dir: vec3<f32>) -> HitInfo {
     return closest_hit;
 }
 
+// Clamp the luminance of an indirect contribution to suppress fireflies: rare
+// very bright paths (e.g. a glossy/refractive bounce that catches the sun)
+// otherwise leave speckles that persist through temporal accumulation. Applied
+// only to bounced light, never to the directly-visible background.
+const FIREFLY_MAX_LUMINANCE: f32 = 8.0;
+
+fn clamp_firefly(contribution: vec3<f32>) -> vec3<f32> {
+    let luminance = dot(contribution, vec3<f32>(0.2126, 0.7152, 0.0722));
+    if (luminance > FIREFLY_MAX_LUMINANCE) {
+        return contribution * (FIREFLY_MAX_LUMINANCE / luminance);
+    }
+    return contribution;
+}
+
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if (global_id.x >= scene.resolution.x || global_id.y >= scene.resolution.y) {
@@ -440,8 +486,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             if (!hit.hit) {
                 // Ray escaped to the environment: collect sky radiance. This is
                 // the only place sky light enters the path, so each surface is
-                // lit exactly once (no per-bounce double counting).
-                radiance = radiance + throughput * sky_color(ray_dir);
+                // lit exactly once (no per-bounce double counting). The primary
+                // ray (bounce 0) is the directly-visible background and is kept
+                // unclamped; bounced contributions are firefly-clamped.
+                let contribution = throughput * sky_color(ray_dir);
+                if (bounce == 0u) {
+                    radiance = radiance + contribution;
+                } else {
+                    radiance = radiance + clamp_firefly(contribution);
+                }
                 path_active = false;
                 break;
             }
@@ -460,15 +513,18 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             // weights and pdfs cancel), so the estimator stays energy conserving.
             throughput = throughput * hit.color;
 
-            ray_origin = hit_pos + hit.normal * 1e-3;
-            ray_dir = scatter_direction(ray_dir, hit.normal, hit.roughness, hit.metallic, bounce_seed);
+            ray_dir = scatter_direction(ray_dir, hit.normal, hit.roughness, hit.metallic, hit.material_type, bounce_seed);
+            // Offset along whichever side of the surface the new ray leaves on,
+            // so transmitted (refracted) rays are pushed inside, not back out.
+            let offset_normal = select(-hit.normal, hit.normal, dot(ray_dir, hit.normal) >= 0.0);
+            ray_origin = hit_pos + offset_normal * 1e-3;
         }
 
         // Paths that exhaust the bounce budget approximate their remaining
         // contribution with the environment along the last scattered direction.
         // This is a bounded approximation, not a re-add of already-counted light.
         if (path_active) {
-            radiance = radiance + throughput * sky_color(ray_dir);
+            radiance = radiance + clamp_firefly(throughput * sky_color(ray_dir));
         }
 
         color_accum = color_accum + radiance;

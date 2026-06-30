@@ -40,6 +40,7 @@ struct SceneObject {
     color: [f32; 3],
     roughness: f32,
     metallic: f32,
+    glass: bool,
     enabled: bool,
 }
 
@@ -1299,6 +1300,7 @@ impl State {
                     color: [1.0, 1.0, 1.0],
                     roughness: 0.25,
                     metallic: 0.0, // Diffuse ground
+                    glass: false,
                     enabled: true,
                 },
                 SceneObject {
@@ -1308,15 +1310,17 @@ impl State {
                     color: [0.8, 1.0, 0.8],
                     roughness: 0.1,
                     metallic: 1.0, // Shiny metal
+                    glass: false,
                     enabled: true,
                 },
                 SceneObject {
-                    name: "Blue Diffuse Sphere".to_string(),
+                    name: "Glass Sphere".to_string(),
                     position: [-1.6, 0.0, 5.0],
                     radius: 1.0,
-                    color: [0.0, 0.0, 1.0],
-                    roughness: 0.5,
-                    metallic: 0.0, // Diffuse
+                    color: [1.0, 1.0, 1.0], // Clear glass (white = untinted)
+                    roughness: 0.0,
+                    metallic: 0.0,
+                    glass: true,
                     enabled: true,
                 },
             ],
@@ -1726,7 +1730,14 @@ impl State {
             .iter()
             .filter(|obj| obj.enabled)
             .map(|obj| {
-                let material_type = if obj.metallic > 0.5 { 1.0 } else { 0.0 }; // 0.0 = diffuse, 1.0 = metallic
+                // 0.0 = diffuse, 1.0 = metallic, 2.0 = dielectric (glass)
+                let material_type = if obj.glass {
+                    2.0
+                } else if obj.metallic > 0.5 {
+                    1.0
+                } else {
+                    0.0
+                };
                 GpuSphere {
                     center_radius: [
                         obj.position[0],
@@ -2100,6 +2111,12 @@ impl State {
                                                     needs_update = true;
                                                 }
                                             });
+                                            if ui
+                                                .checkbox(&mut obj.glass, "Glass (refractive)")
+                                                .changed()
+                                            {
+                                                needs_update = true;
+                                            }
                                             if ui.color_edit_button_rgb(&mut obj.color).changed() {
                                                 needs_update = true;
                                             }
@@ -2161,6 +2178,7 @@ impl State {
                                     color: ui_state.new_object_color,
                                     roughness: 0.5,
                                     metallic: 0.0,
+                                    glass: false,
                                     enabled: true,
                                 });
                                 ui_state.show_add_object_dialog = false;
