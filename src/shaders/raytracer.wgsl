@@ -177,10 +177,32 @@ fn scatter_direction(
 
         let xi = random_float(seed + vec3<u32>(211u, 97u, 41u));
         // Total internal reflection, or a Fresnel-weighted reflection event.
-        if (eta * sin_theta > 1.0 || reflectance > xi) {
-            return reflect(unit_in, oriented_n);
+        let reflecting = eta * sin_theta > 1.0 || reflectance > xi;
+
+        if (reflecting) {
+            let reflected = reflect(unit_in, oriented_n);
+            // Frosted glass: perturb the reflection, keeping it above the surface.
+            if (roughness > 0.01) {
+                let perturb = random_unit_vector(seed + vec3<u32>(7u, 11u, 13u)) * roughness;
+                let rough_dir = normalize(reflected + perturb);
+                if (dot(rough_dir, oriented_n) > 0.0) {
+                    return rough_dir;
+                }
+            }
+            return reflected;
         }
-        return refract(unit_in, oriented_n, eta);
+
+        let refracted = refract(unit_in, oriented_n, eta);
+        // Frosted glass: perturb the refraction, keeping it on the transmitted
+        // side (the opposite hemisphere from the oriented normal).
+        if (roughness > 0.01) {
+            let perturb = random_unit_vector(seed + vec3<u32>(23u, 29u, 31u)) * roughness;
+            let rough_dir = normalize(refracted + perturb);
+            if (dot(rough_dir, oriented_n) < 0.0) {
+                return rough_dir;
+            }
+        }
+        return refracted;
     }
 
     let select_specular = random_float(seed + vec3<u32>(101u, 53u, 29u)) < metallic;
