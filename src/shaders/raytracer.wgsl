@@ -73,10 +73,24 @@ var environment_sampler: sampler;
 const BVH_STACK_SIZE: u32 = 64u;
 const LARGE_DISTANCE: f32 = 1e30;
 
+// PCG3D: a high-quality integer hash (Mark Jarzynski & Marc Olano, JCGT 2020).
+// Replaces the old fract(sin(...)) hash, which had poor decorrelation and
+// relied on sin() precision that varies between GPUs.
+fn pcg3d(v_in: vec3<u32>) -> vec3<u32> {
+    var v = v_in * 1664525u + 1013904223u;
+    v.x = v.x + v.y * v.z;
+    v.y = v.y + v.z * v.x;
+    v.z = v.z + v.x * v.y;
+    v = v ^ (v >> vec3<u32>(16u));
+    v.x = v.x + v.y * v.z;
+    v.y = v.y + v.z * v.x;
+    v.z = v.z + v.x * v.y;
+    return v;
+}
+
 fn hash_float3(value: vec3<u32>) -> f32 {
-    let value_f = vec3<f32>(f32(value.x), f32(value.y), f32(value.z));
-    let dot_product = dot(value_f, vec3<f32>(0.1031, 0.11369, 0.13787));
-    return fract(sin(dot_product) * 43758.5453);
+    // Map the top word of the PCG3D output to [0, 1).
+    return f32(pcg3d(value).x) * (1.0 / 4294967296.0);
 }
 
 fn random2(pixel: vec2<u32>, sample: u32, frame_seed: u32) -> vec2<f32> {
@@ -98,42 +112,114 @@ fn random_unit_vector(seed: vec3<u32>) -> vec3<f32> {
     return vec3<f32>(cos(theta) * r, sin(theta) * r, z);
 }
 
-fn random_in_hemisphere(normal: vec3<f32>, seed: vec3<u32>) -> vec3<f32> {
-    var dir = random_unit_vector(seed);
-    if (dot(dir, normal) < 0.0) {
-        dir = -dir;
-    }
-    return dir;
+fn random_pair(seed: vec3<u32>) -> vec2<f32> {
+    let r = pcg3d(seed);
+    return vec2<f32>(f32(r.x), f32(r.y)) * (1.0 / 4294967296.0);
 }
 
 fn reflect(incident: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
     return incident - 2.0 * dot(incident, normal) * normal;
 }
 
-// Sample a direction based on material type
-fn sample_material_direction(
+// Cosine-weighted hemisphere sampling around `normal`. The cosine term in the
+// diffuse rendering equation cancels the pdf (cos/PI), so paths sampled this way
+// need only weight throughput by the surface albedo.
+fn cosine_sample_hemisphere(normal: vec3<f32>, seed: vec3<u32>) -> vec3<f32> {
+    let xi = random_pair(seed);
+    let r = sqrt(xi.x);
+    let theta = 2.0 * PI * xi.y;
+    let x = r * cos(theta);
+    let y = r * sin(theta);
+    let z = sqrt(max(0.0, 1.0 - xi.x));
+
+    // Build an orthonormal basis around the normal.
+    let up = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(normal.y) > 0.999);
+    let tangent = normalize(cross(up, normal));
+    let bitangent = cross(normal, tangent);
+    return normalize(tangent * x + bitangent * y + normal * z);
+}
+
+// Material type tags (must match gpu_scene.rs / sphere_to_gpu): 0 diffuse,
+// 1 metallic, 2 dielectric (glass).
+const MATERIAL_DIELECTRIC: f32 = 1.5; // threshold: material_type > this == glass
+const GLASS_IOR: f32 = 1.5;
+
+// Choose an outgoing direction for the surface interaction.
+// - Dielectric (glass): stochastically reflect or refract using the Fresnel
+//   (Schlick) reflectance, handling total internal reflection.
+// - Otherwise: specular and diffuse lobes are selected stochastically with
+//   probability `metallic`; because each lobe's BRDF weight is cancelled by its
+//   selection probability, the caller updates throughput simply with *= albedo,
+//   keeping the path tracer energy conserving (no ad-hoc loss factors).
+fn scatter_direction(
     incident_dir: vec3<f32>,
     normal: vec3<f32>,
     roughness: f32,
     metallic: f32,
+    material_type: f32,
     seed: vec3<u32>
 ) -> vec3<f32> {
-    // Perfect reflection for metallic
-    let reflected = reflect(incident_dir, normal);
+    if (material_type > MATERIAL_DIELECTRIC) {
+        let unit_in = normalize(incident_dir);
+        // Outward normal points away from the surface; orient it against the
+        // incoming ray and pick the index ratio for entering vs exiting glass.
+        let front_face = dot(unit_in, normal) < 0.0;
+        let oriented_n = select(-normal, normal, front_face);
+        let eta = select(GLASS_IOR, 1.0 / GLASS_IOR, front_face);
 
-    // Diffuse scatter
-    let diffuse = random_in_hemisphere(normal, seed);
+        let cos_theta = min(dot(-unit_in, oriented_n), 1.0);
+        let sin_theta = sqrt(max(0.0, 1.0 - cos_theta * cos_theta));
 
-    // Blend between diffuse and reflection based on metallic value
-    let dir = mix(diffuse, reflected, metallic);
+        // Schlick approximation of the Fresnel reflectance.
+        let r0_root = (1.0 - eta) / (1.0 + eta);
+        let r0 = r0_root * r0_root;
+        let reflectance = r0 + (1.0 - r0) * pow(1.0 - cos_theta, 5.0);
 
-    // Add roughness by perturbing the direction slightly
-    if (roughness > 0.01) {
-        let perturb = random_unit_vector(seed + vec3<u32>(7u, 11u, 13u)) * roughness;
-        return normalize(dir + perturb);
+        let xi = random_float(seed + vec3<u32>(211u, 97u, 41u));
+        // Total internal reflection, or a Fresnel-weighted reflection event.
+        let reflecting = eta * sin_theta > 1.0 || reflectance > xi;
+
+        if (reflecting) {
+            let reflected = reflect(unit_in, oriented_n);
+            // Frosted glass: perturb the reflection, keeping it above the surface.
+            if (roughness > 0.01) {
+                let perturb = random_unit_vector(seed + vec3<u32>(7u, 11u, 13u)) * roughness;
+                let rough_dir = normalize(reflected + perturb);
+                if (dot(rough_dir, oriented_n) > 0.0) {
+                    return rough_dir;
+                }
+            }
+            return reflected;
+        }
+
+        let refracted = refract(unit_in, oriented_n, eta);
+        // Frosted glass: perturb the refraction, keeping it on the transmitted
+        // side (the opposite hemisphere from the oriented normal).
+        if (roughness > 0.01) {
+            let perturb = random_unit_vector(seed + vec3<u32>(23u, 29u, 31u)) * roughness;
+            let rough_dir = normalize(refracted + perturb);
+            if (dot(rough_dir, oriented_n) < 0.0) {
+                return rough_dir;
+            }
+        }
+        return refracted;
     }
 
-    return normalize(dir);
+    let select_specular = random_float(seed + vec3<u32>(101u, 53u, 29u)) < metallic;
+    if (select_specular) {
+        let reflected = reflect(incident_dir, normal);
+        var dir = reflected;
+        if (roughness > 0.01) {
+            let perturb = random_unit_vector(seed + vec3<u32>(7u, 11u, 13u)) * roughness;
+            dir = normalize(reflected + perturb);
+        }
+        // Keep glossy reflections in the upper hemisphere.
+        if (dot(dir, normal) < 0.0) {
+            dir = reflected;
+        }
+        return dir;
+    }
+    return cosine_sample_hemisphere(normal, seed);
 }
 
 fn sky_color(ray_dir: vec3<f32>) -> vec3<f32> {
@@ -372,35 +458,18 @@ fn trace_ray(origin: vec3<f32>, dir: vec3<f32>) -> HitInfo {
     return closest_hit;
 }
 
-fn evaluate_environment(
-    normal: vec3<f32>,
-    albedo: vec3<f32>,
-    view_dir: vec3<f32>,
-    roughness: f32,
-    metallic: f32
-) -> vec3<f32> {
-    let n = normalize(normal);
+// Clamp the luminance of an indirect contribution to suppress fireflies: rare
+// very bright paths (e.g. a glossy/refractive bounce that catches the sun)
+// otherwise leave speckles that persist through temporal accumulation. Applied
+// only to bounced light, never to the directly-visible background.
+const FIREFLY_MAX_LUMINANCE: f32 = 8.0;
 
-    // Approximate diffuse contribution by sampling the environment along the surface normal.
-    let env_diffuse = sky_color(n);
-    let diffuse = albedo * env_diffuse * (1.0 - metallic) * (1.0 / PI);
-
-    // Approximate specular contribution by sampling the environment in the reflection direction.
-    let reflection_dir = reflect(-view_dir, n);
-    let raw_specular = sky_color(reflection_dir);
-
-    // Rough surfaces see a blurrier environment; approximate by blending with the diffuse sample.
-    let reflectivity = pow(1.0 - roughness, 4.0);
-    let env_specular = mix(env_diffuse, raw_specular, reflectivity);
-
-    // Fresnel term (Schlick approximation) to mix specular color.
-    let f0 = mix(vec3<f32>(0.04), albedo, metallic);
-    let cos_theta = clamp(dot(normalize(view_dir), n), 0.0, 1.0);
-    let fresnel = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - cos_theta, 5.0);
-
-    let specular = env_specular * fresnel * reflectivity;
-
-    return diffuse + specular;
+fn clamp_firefly(contribution: vec3<f32>) -> vec3<f32> {
+    let luminance = dot(contribution, vec3<f32>(0.2126, 0.7152, 0.0722));
+    if (luminance > FIREFLY_MAX_LUMINANCE) {
+        return contribution * (FIREFLY_MAX_LUMINANCE / luminance);
+    }
+    return contribution;
 }
 
 @compute @workgroup_size(8, 8)
@@ -437,38 +506,47 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         for (var bounce: u32 = 0u; bounce < max_bounces; bounce = bounce + 1u) {
             let hit = trace_ray(ray_origin, ray_dir);
             if (!hit.hit) {
-                radiance = radiance + throughput * sky_color(ray_dir);
+                // Ray escaped to the environment: collect sky radiance. This is
+                // the only place sky light enters the path, so each surface is
+                // lit exactly once (no per-bounce double counting). The primary
+                // ray (bounce 0) is the directly-visible background and is kept
+                // unclamped; bounced contributions are firefly-clamped.
+                let contribution = throughput * sky_color(ray_dir);
+                if (bounce == 0u) {
+                    radiance = radiance + contribution;
+                } else {
+                    radiance = radiance + clamp_firefly(contribution);
+                }
                 path_active = false;
                 break;
             }
 
             let hit_pos = ray_origin + ray_dir * hit.dist;
 
-            // Compute view direction for specular
-            let view_dir = normalize(-ray_dir);
-
-            // Evaluate direct lighting (includes diffuse and specular)
-            let direct = evaluate_environment(hit.normal, hit.color, view_dir, hit.roughness, hit.metallic);
-            radiance = radiance + throughput * direct;
-
-            let bounce_albedo = mix(hit.color, vec3<f32>(1.0), hit.metallic);
-            let scatter_loss = mix(0.85, 0.98, hit.metallic);
-            throughput = throughput * bounce_albedo * scatter_loss;
-
             let bounce_seed = vec3<u32>(
                 pixel_coords.x + 17u * bounce + 13u * sample,
                 pixel_coords.y + 31u * bounce + 7u * sample,
                 sample * max_bounces + bounce + frame_seed * 1000u,
             );
-            ray_origin = hit_pos + hit.normal * 1e-3;
 
-            // Use material-aware direction sampling
-            ray_dir = sample_material_direction(ray_dir, hit.normal, hit.roughness, hit.metallic, bounce_seed);
+            // Surfaces are not emitters: lighting is gathered by tracing the
+            // scattered ray. With cosine-weighted diffuse sampling and stochastic
+            // lobe selection, the throughput update is just *= albedo (the BRDF
+            // weights and pdfs cancel), so the estimator stays energy conserving.
+            throughput = throughput * hit.color;
+
+            ray_dir = scatter_direction(ray_dir, hit.normal, hit.roughness, hit.metallic, hit.material_type, bounce_seed);
+            // Offset along whichever side of the surface the new ray leaves on,
+            // so transmitted (refracted) rays are pushed inside, not back out.
+            let offset_normal = select(-hit.normal, hit.normal, dot(ray_dir, hit.normal) >= 0.0);
+            ray_origin = hit_pos + offset_normal * 1e-3;
         }
 
-        // If path is still active after max bounces, add environment contribution
+        // Paths that exhaust the bounce budget approximate their remaining
+        // contribution with the environment along the last scattered direction.
+        // This is a bounded approximation, not a re-add of already-counted light.
         if (path_active) {
-            radiance = radiance + throughput * sky_color(ray_dir);
+            radiance = radiance + clamp_firefly(throughput * sky_color(ray_dir));
         }
 
         color_accum = color_accum + radiance;

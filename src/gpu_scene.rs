@@ -91,6 +91,93 @@ fn centroid_component(primitive: &TrianglePrimitive, axis: usize) -> f64 {
     }
 }
 
+fn axis_value(vec: Vec3, axis: usize) -> f64 {
+    match axis {
+        0 => vec.x,
+        1 => vec.y,
+        _ => vec.z,
+    }
+}
+
+fn surface_area(min: Vec3, max: Vec3) -> f64 {
+    let dx = (max.x - min.x).max(0.0);
+    let dy = (max.y - min.y).max(0.0);
+    let dz = (max.z - min.z).max(0.0);
+    2.0 * (dx * dy + dy * dz + dz * dx)
+}
+
+/// A bucket used by the binned Surface Area Heuristic builder.
+#[derive(Clone, Copy)]
+struct SahBin {
+    count: usize,
+    bounds_min: Vec3,
+    bounds_max: Vec3,
+}
+
+impl SahBin {
+    fn empty() -> Self {
+        SahBin {
+            count: 0,
+            bounds_min: Vec3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY),
+            bounds_max: Vec3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
+        }
+    }
+
+    fn expand(&mut self, min: Vec3, max: Vec3) {
+        self.bounds_min.x = self.bounds_min.x.min(min.x);
+        self.bounds_min.y = self.bounds_min.y.min(min.y);
+        self.bounds_min.z = self.bounds_min.z.min(min.z);
+        self.bounds_max.x = self.bounds_max.x.max(max.x);
+        self.bounds_max.y = self.bounds_max.y.max(max.y);
+        self.bounds_max.z = self.bounds_max.z.max(max.z);
+    }
+
+    fn merge(&mut self, other: &SahBin) {
+        self.count += other.count;
+        if other.count > 0 {
+            self.expand(other.bounds_min, other.bounds_max);
+        }
+    }
+
+    fn area(&self) -> f64 {
+        if self.count == 0 {
+            0.0
+        } else {
+            surface_area(self.bounds_min, self.bounds_max)
+        }
+    }
+}
+
+/// Reorder `indices` so that primitives whose centroid is below `split` along
+/// `axis` come first. Returns the number of primitives on the left side.
+fn partition_indices(
+    indices: &mut [usize],
+    primitives: &[TrianglePrimitive],
+    axis: usize,
+    split: f64,
+) -> usize {
+    let mut left = 0usize;
+    for i in 0..indices.len() {
+        if centroid_component(&primitives[indices[i]], axis) < split {
+            indices.swap(left, i);
+            left += 1;
+        }
+    }
+    left
+}
+
+/// Sort `indices` along `axis` and return the median offset (always a valid,
+/// non-empty split for slices of length >= 2). Used as a fallback when SAH
+/// cannot find a useful split (e.g. coincident centroids).
+fn median_split(indices: &mut [usize], primitives: &[TrianglePrimitive], axis: usize) -> usize {
+    indices.sort_by(|&a, &b| {
+        centroid_component(&primitives[a], axis)
+            .partial_cmp(&centroid_component(&primitives[b], axis))
+            .unwrap_or(Ordering::Equal)
+    });
+    indices.len() / 2
+}
+
 fn merge_bounds(min_a: Vec3, max_a: Vec3, min_b: Vec3, max_b: Vec3) -> (Vec3, Vec3) {
     let min = Vec3::new(
         min_a.x.min(min_b.x),
@@ -168,24 +255,85 @@ fn build_bvh_nodes(
         centroid_max.z - centroid_min.z,
     );
 
-    let mut axis = 0;
+    // Largest-extent axis, used as the SAH fallback when no good split exists.
+    let mut largest_axis = 0;
     if extent.y > extent.x {
-        axis = 1;
+        largest_axis = 1;
     }
-    if extent.z > if axis == 0 { extent.x } else { extent.y } {
-        axis = 2;
+    if extent.z > axis_value(extent, largest_axis) {
+        largest_axis = 2;
     }
 
-    indices[start..end].sort_by(|&a, &b| {
-        centroid_component(&primitives[a], axis)
-            .partial_cmp(&centroid_component(&primitives[b], axis))
-            .unwrap_or(Ordering::Equal)
-    });
+    // Binned Surface Area Heuristic: evaluate candidate split planes across all
+    // three axes and pick the one minimising expected traversal cost. This
+    // produces tighter, faster-to-traverse trees than a plain median split.
+    const NUM_BINS: usize = 12;
+    let mut best_cost = f64::INFINITY;
+    let mut best_axis = largest_axis;
+    let mut best_split = 0.0f64;
+    let mut found_split = false;
 
-    let mut mid = start + count / 2;
-    if mid == start || mid == end {
-        mid = start + count / 2;
+    for axis in 0..3 {
+        let axis_min = axis_value(centroid_min, axis);
+        let axis_extent = axis_value(extent, axis);
+        if axis_extent <= 0.0 {
+            continue;
+        }
+
+        let mut bins = [SahBin::empty(); NUM_BINS];
+        let scale = NUM_BINS as f64 / axis_extent;
+        for &idx in &indices[start..end] {
+            let c = centroid_component(&primitives[idx], axis);
+            let mut bin = ((c - axis_min) * scale) as usize;
+            if bin >= NUM_BINS {
+                bin = NUM_BINS - 1;
+            }
+            bins[bin].count += 1;
+            bins[bin].expand(primitives[idx].bounds_min, primitives[idx].bounds_max);
+        }
+
+        // Prefix sweep: bounds/count of everything left of each split plane.
+        let mut left_area = [0.0f64; NUM_BINS - 1];
+        let mut left_count = [0usize; NUM_BINS - 1];
+        let mut acc = SahBin::empty();
+        for i in 0..(NUM_BINS - 1) {
+            acc.merge(&bins[i]);
+            left_area[i] = acc.area();
+            left_count[i] = acc.count;
+        }
+
+        // Suffix sweep: combine with the right side to score each plane.
+        let mut acc_right = SahBin::empty();
+        for i in (0..(NUM_BINS - 1)).rev() {
+            acc_right.merge(&bins[i + 1]);
+            if left_count[i] == 0 || acc_right.count == 0 {
+                continue;
+            }
+            let cost =
+                left_area[i] * left_count[i] as f64 + acc_right.area() * acc_right.count as f64;
+            if cost < best_cost {
+                best_cost = cost;
+                best_axis = axis;
+                best_split = axis_min + (i as f64 + 1.0) * (axis_extent / NUM_BINS as f64);
+                found_split = true;
+            }
+        }
     }
+
+    let left_count = {
+        let slice = &mut indices[start..end];
+        let mut lc = if found_split {
+            partition_indices(slice, primitives, best_axis, best_split)
+        } else {
+            median_split(slice, primitives, best_axis)
+        };
+        // Guard against a degenerate partition (all primitives on one side).
+        if lc == 0 || lc == count {
+            lc = median_split(slice, primitives, best_axis);
+        }
+        lc
+    };
+    let mid = start + left_count;
 
     let (left_child, left_min, left_max) =
         build_bvh_nodes(primitives, indices, start, mid, nodes, output_triangles);

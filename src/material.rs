@@ -37,6 +37,15 @@ impl Material {
         }
     }
 
+    pub fn new_dielectric(color: Vec3, roughness: f64) -> Self {
+        Material {
+            color,
+            roughness,
+            material_type: MaterialType::Dielectric,
+            metallic: 0.0,
+        }
+    }
+
     pub fn new_mixed(color: Vec3, roughness: f64, metallic: f64) -> Self {
         let material_type = if metallic > 0.5 {
             MaterialType::Metallic
