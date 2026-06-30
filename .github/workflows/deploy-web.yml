@@ -45,7 +45,7 @@ jobs:
 
       - name: Build web bundle
         env:
-          TRUNK_BUILD_PUBLIC_URL: /rust-rasterizer/
+          TRUNK_BUILD_PUBLIC_URL: /rust-raytracer/
         run: trunk build --release
 
       - name: Upload GitHub Pages artifact

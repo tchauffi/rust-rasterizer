@@ -10,8 +10,8 @@
 
 **Run locally:**
 ```bash
-git clone https://github.com/tchauffi/rust-rasterizer.git
-cd rust-rasterizer
+git clone https://github.com/tchauffi/rust-raytracer.git
+cd rust-raytracer
 cargo run --bin live_raytracer --release
 ```
 
